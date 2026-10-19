@@ -57,7 +57,15 @@ import com.carpimtablosu.app.logic.QType
 import com.carpimtablosu.app.logic.Question
 import com.carpimtablosu.app.logic.TurkishNumbers
 import com.carpimtablosu.app.ui.AppViewModel
+import com.carpimtablosu.app.ui.LocalIsTv
 import com.carpimtablosu.app.ui.LocalMedia
+import com.carpimtablosu.app.ui.focusRing
+import com.carpimtablosu.app.ui.initialFocus
+import com.carpimtablosu.app.logic.AnswerResult
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import android.view.KeyEvent as AndroidKeyEvent
 import com.carpimtablosu.app.ui.components.BigButton
 import com.carpimtablosu.app.ui.components.ButtonStyle
 import com.carpimtablosu.app.ui.components.Glyph
@@ -109,50 +117,41 @@ fun LessonScreen(vm: AppViewModel) {
     Column(Modifier.fillMaxSize()) {
         LessonTopBar(lesson, time.bankSec, sprint, onClose = { askQuit = true }, onTimeUp = { vm.timeUp() })
 
-        Column(
-            Modifier
-                .weight(1f)
-                .fillMaxWidth()
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 20.dp),
-        ) {
-            Spacer(Modifier.height(8.dp))
-            Text(q.instruction, style = MaterialTheme.typography.headlineSmall, color = Palette.Text)
-            Spacer(Modifier.height(12.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Mascot(
-                    when {
-                        answer == null -> Mood.THINKING
-                        answer.correct -> Mood.HAPPY
-                        else -> Mood.SAD
-                    },
-                    104.dp,
-                )
-                Spacer(Modifier.width(8.dp))
-                SpeechBubble(Modifier.weight(1f)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            q.prompt,
-                            fontSize = if (q.prompt.length > 11) 30.sp else 36.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            color = Palette.Text,
-                            modifier = Modifier.weight(1f),
-                        )
-                        if (media.speaker.available && !sprint) {
-                            Box(
-                                Modifier
-                                    .size(40.dp)
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .background(Palette.Blue)
-                                    .clickable { media.speaker.speak(q.spoken) },
-                                contentAlignment = Alignment.Center,
-                            ) { Text("🔊", fontSize = 18.sp) }
-                        }
-                    }
+        if (LocalIsTv.current) {
+            // TV: yatay ekran; solda soru, sağda cevaplar
+            Row(
+                Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp),
+            ) {
+                Column(
+                    Modifier
+                        .weight(1f)
+                        .verticalScroll(rememberScrollState()),
+                ) { QuestionPanel(q, answer, sprint) }
+                Spacer(Modifier.width(32.dp))
+                Column(
+                    Modifier
+                        .weight(1f)
+                        .verticalScroll(rememberScrollState()),
+                ) {
+                    Spacer(Modifier.height(8.dp))
+                    AnswerArea(vm, q, lesson, settings.voiceAnswers, sprint)
                 }
             }
-            Spacer(Modifier.height(20.dp))
-            AnswerArea(vm, q, lesson, settings.voiceAnswers, sprint)
+        } else {
+            Column(
+                Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 20.dp),
+            ) {
+                QuestionPanel(q, answer, sprint)
+                Spacer(Modifier.height(20.dp))
+                AnswerArea(vm, q, lesson, settings.voiceAnswers, sprint)
+            }
         }
 
         FeedbackArea(lesson, q, onNext = { vm.next() }, sprint = sprint)
@@ -177,6 +176,47 @@ fun LessonScreen(vm: AppViewModel) {
 }
 
 @Composable
+private fun QuestionPanel(q: Question, answer: AnswerResult?, sprint: Boolean) {
+    val media = LocalMedia.current
+    Spacer(Modifier.height(8.dp))
+    Text(q.instruction, style = MaterialTheme.typography.headlineSmall, color = Palette.Text)
+    Spacer(Modifier.height(12.dp))
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Mascot(
+            when {
+                answer == null -> Mood.THINKING
+                answer.correct -> Mood.HAPPY
+                else -> Mood.SAD
+            },
+            104.dp,
+        )
+        Spacer(Modifier.width(8.dp))
+        SpeechBubble(Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    q.prompt,
+                    fontSize = if (q.prompt.length > 11) 30.sp else 36.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = Palette.Text,
+                    modifier = Modifier.weight(1f),
+                )
+                if (media.speaker.available && !sprint) {
+                    Box(
+                        Modifier
+                            .size(40.dp)
+                            .focusRing(RoundedCornerShape(12.dp))
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Palette.Blue)
+                            .clickable { media.speaker.speak(q.spoken) },
+                        contentAlignment = Alignment.Center,
+                    ) { Text("🔊", fontSize = 18.sp) }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun LessonTopBar(lesson: LessonState, bankSec: Long, sprint: Boolean, onClose: () -> Unit, onTimeUp: () -> Unit) {
     Row(
         Modifier
@@ -187,6 +227,7 @@ private fun LessonTopBar(lesson: LessonState, bankSec: Long, sprint: Boolean, on
         Box(
             Modifier
                 .size(40.dp)
+                .focusRing(RoundedCornerShape(12.dp))
                 .clip(RoundedCornerShape(12.dp))
                 .clickable(onClick = onClose),
             contentAlignment = Alignment.Center,
@@ -238,14 +279,15 @@ private fun AnswerArea(vm: AppViewModel, q: Question, lesson: LessonState, voice
 @Composable
 private fun ChoiceGrid(q: Question, given: Int?, locked: Boolean, onPick: (Int) -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        q.options.chunked(2).forEach { row ->
+        q.options.chunked(2).forEachIndexed { r, row ->
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                row.forEach { opt ->
+                row.forEachIndexed { c, opt ->
                     OptionButton(
                         text = "$opt",
                         state = optionState(opt, q.answer, given, locked),
                         enabled = !locked,
                         modifier = Modifier.weight(1f),
+                        focusModifier = Modifier.initialFocus(LocalIsTv.current && !locked && r == 0 && c == 0, q.id),
                     ) { onPick(opt) }
                 }
             }
@@ -262,6 +304,7 @@ private fun TrueFalse(q: Question, given: Int?, locked: Boolean, onPick: (Int) -
                 state = optionState(v, q.answer, given, locked),
                 enabled = !locked,
                 modifier = Modifier.weight(1f),
+                focusModifier = Modifier.initialFocus(LocalIsTv.current && !locked && v == 1, q.id),
             ) { onPick(v) }
         }
     }
@@ -277,7 +320,14 @@ private fun optionState(value: Int, answer: Int, given: Int?, locked: Boolean): 
 }
 
 @Composable
-private fun OptionButton(text: String, state: OptState, enabled: Boolean, modifier: Modifier, onClick: () -> Unit) {
+private fun OptionButton(
+    text: String,
+    state: OptState,
+    enabled: Boolean,
+    modifier: Modifier,
+    focusModifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
     val (bg, shadow, border, fg) = when (state) {
         OptState.NORMAL -> Quad(Palette.Surface, Palette.Outline, Palette.Outline, Palette.Text)
         // Opak olmalı: yarı saydam olursa alttaki gölge katmanı görünür
@@ -293,6 +343,7 @@ private fun OptionButton(text: String, state: OptState, enabled: Boolean, modifi
         enabled = enabled,
         modifier = modifier,
         contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 22.dp),
+        focusModifier = focusModifier,
     ) {
         Text(text, fontSize = 28.sp, fontWeight = FontWeight.ExtraBold, color = fg)
     }
@@ -340,11 +391,37 @@ private fun KeypadAnswer(vm: AppViewModel, q: Question, locked: Boolean, voiceEn
         else -> Palette.Red
     }
 
-    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
+    val isTv = LocalIsTv.current
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier
+            .fillMaxWidth()
+            // Kumanda/klavyedeki rakam tuşları doğrudan yazar
+            .onPreviewKeyEvent { e ->
+                if (locked || e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                val code = e.nativeKeyEvent.keyCode
+                val digit = when (code) {
+                    in AndroidKeyEvent.KEYCODE_0..AndroidKeyEvent.KEYCODE_9 -> code - AndroidKeyEvent.KEYCODE_0
+                    in AndroidKeyEvent.KEYCODE_NUMPAD_0..AndroidKeyEvent.KEYCODE_NUMPAD_9 -> code - AndroidKeyEvent.KEYCODE_NUMPAD_0
+                    else -> -1
+                }
+                when {
+                    digit >= 0 -> {
+                        if (typed.length < 3) typed = (typed + digit).trimStart('0').ifEmpty { "0" }
+                        true
+                    }
+                    code == AndroidKeyEvent.KEYCODE_DEL -> {
+                        typed = typed.dropLast(1)
+                        true
+                    }
+                    else -> false
+                }
+            },
+    ) {
         Box(
             Modifier
                 .fillMaxWidth()
-                .height(72.dp)
+                .height(if (isTv) 60.dp else 72.dp)
                 .clip(RoundedCornerShape(16.dp))
                 .background(Palette.Surface)
                 .border(3.dp, boxColor, RoundedCornerShape(16.dp)),
@@ -396,7 +473,8 @@ private fun KeypadAnswer(vm: AppViewModel, q: Question, locked: Boolean, voiceEn
                                 enabled = !locked,
                                 depth = 3.dp,
                                 modifier = Modifier.weight(1f),
-                                contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 12.dp),
+                                contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = if (isTv) 8.dp else 12.dp),
+                                focusModifier = Modifier.initialFocus(isTv && !locked && key == "1", q.id),
                             ) {
                                 Text(key, fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Palette.Text)
                             }
@@ -462,7 +540,12 @@ private fun FeedbackArea(lesson: LessonState, q: Question, onNext: () -> Unit, s
             }
             if (!sprint) {
                 Spacer(Modifier.height(14.dp))
-                BigButton("Devam", onNext, style = if (ok) ButtonStyle.SUCCESS else ButtonStyle.DANGER)
+                BigButton(
+                    "Devam", onNext,
+                    style = if (ok) ButtonStyle.SUCCESS else ButtonStyle.DANGER,
+                    autoFocus = LocalIsTv.current,
+                    focusKey = q.id,
+                )
             }
         }
     }

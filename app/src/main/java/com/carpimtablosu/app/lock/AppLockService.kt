@@ -19,6 +19,7 @@ import android.widget.Toast
 import androidx.core.content.ContextCompat
 import com.carpimtablosu.app.App
 import com.carpimtablosu.app.DebugLog
+import com.carpimtablosu.app.Platform
 import com.carpimtablosu.app.R
 import com.carpimtablosu.app.data.Repository
 import com.carpimtablosu.app.data.ServiceStatus
@@ -61,6 +62,12 @@ class AppLockService : AccessibilityService() {
     private var lastDecision: String? = null
     private var lastStatusWrite = 0L
     private var ignored: Set<String> = emptySet()
+    /** Ana ekran, ayarlar, sistem: ayarlarda seçili olsa bile asla kilitlenmez. */
+    private var neverLock: Set<String> = emptySet()
+    private var isTv = false
+    /** Son kilitlerin zamanları; kısa sürede çok fazla kilit olursa fren devreye girer. */
+    private val recentBlocks = ArrayDeque<Long>()
+    private var brakeUntil = 0L
 
     private val testReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -99,6 +106,9 @@ class AppLockService : AccessibilityService() {
         notifications = getSystemService(NotificationManager::class.java)
         overlay = LockOverlay(this, onHome = { goHome() }, onEarn = { openTraining() }, onEmergency = { openDialer() })
         ignored = buildIgnoredSet()
+        neverLock = SystemAccess.neverLockPackages(this)
+        isTv = Platform.isTv(this)
+        DebugLog.log("Platform: ${if (isTv) "TV" else "telefon"}, asla kilitlenmeyen: ${neverLock.sorted()}")
         repo.refresh()
         val s = repo.settings.value
         DebugLog.log(
@@ -185,6 +195,11 @@ class AppLockService : AccessibilityService() {
             pkg in SystemAccess.PROTECTED_PACKAGES -> {
                 endSession()
                 checkProtection(throttle = false)
+            }
+            pkg in neverLock -> {
+                // Güvenlik: sistem uygulamaları ayarlarda seçili olsa bile kilitlenmez
+                if (pkg in repo.settings.value.lockedApps) DebugLog.log("Güvenlik: $pkg sistem uygulaması, kilitlenmedi")
+                endSession()
             }
             else -> evaluate(pkg)
         }
@@ -310,7 +325,20 @@ class AppLockService : AccessibilityService() {
 
     private fun block(mode: LockMode, pkg: String) {
         val now = SystemClock.elapsedRealtime()
+        if (pkg.isNotEmpty() && pkg in neverLock) return
+        if (now < brakeUntil) return
         if (now - lastBlock < BLOCK_DEBOUNCE_MS && overlay.isShowing) return
+        // Fren: bir hata sonucu durmadan kilitleme olursa (ör. ana ekrana dönülemiyorsa)
+        // cihazın kullanılamaz hale gelmemesi için kilit kısa süre durdurulur.
+        while (recentBlocks.isNotEmpty() && now - recentBlocks.first() > BRAKE_WINDOW_MS) recentBlocks.removeFirst()
+        recentBlocks.addLast(now)
+        if (recentBlocks.size > BRAKE_MAX_BLOCKS) {
+            brakeUntil = now + BRAKE_PAUSE_MS
+            recentBlocks.clear()
+            DebugLog.log("GÜVENLİK FRENİ: ${BRAKE_WINDOW_MS / 1000} sn içinde çok fazla kilit; ${BRAKE_PAUSE_MS / 1000} sn duraklatıldı")
+            overlay.hide()
+            return
+        }
         lastBlock = now
         DebugLog.log("KİLİT: $pkg ($mode)")
         val home = performGlobalAction(GLOBAL_ACTION_HOME)
@@ -323,6 +351,8 @@ class AppLockService : AccessibilityService() {
     }
 
     private fun checkProtection(throttle: Boolean) {
+        // TV'de ayar koruması yoktur: kumandayla şifre girilemezse ebeveyn ayarlara ulaşamazdı
+        if (isTv) return
         val now = SystemClock.elapsedRealtime()
         if (throttle && now - lastProtectCheck < PROTECT_THROTTLE_MS) return
         lastProtectCheck = now
@@ -360,6 +390,9 @@ class AppLockService : AccessibilityService() {
     }
 
     internal val isLockShowing: Boolean get() = overlay.isShowing
+
+    /** Testler için: kullanıcının kilit ekranını kapatmasını taklit eder. */
+    internal fun dismissLockForTest() = overlay.hide()
 
     private fun writeStatus(connected: Boolean) {
         lastStatusWrite = SystemClock.elapsedRealtime()
@@ -417,6 +450,9 @@ class AppLockService : AccessibilityService() {
         private const val BLOCK_DEBOUNCE_MS = 800L
         private const val PROTECT_THROTTLE_MS = 500L
         private const val SPEND_BATCH_MS = 5_000L
+        private const val BRAKE_WINDOW_MS = 60_000L
+        private const val BRAKE_MAX_BLOCKS = 15
+        private const val BRAKE_PAUSE_MS = 60_000L
         private const val STATUS_EVERY_MS = 10_000L
         private const val NOTIF_REMAINING = 1
         private const val NOTIF_WARN = 2

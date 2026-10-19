@@ -5,10 +5,13 @@ import android.graphics.PixelFormat
 import android.os.Handler
 import android.os.Looper
 import android.view.KeyEvent
+import android.view.MotionEvent
 import android.view.WindowManager
 import android.widget.FrameLayout
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -44,6 +47,9 @@ import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import com.carpimtablosu.app.App
 import com.carpimtablosu.app.DebugLog
+import com.carpimtablosu.app.Platform
+import com.carpimtablosu.app.ui.LocalIsTv
+import androidx.compose.runtime.CompositionLocalProvider
 import com.carpimtablosu.app.data.PasswordCheck
 import com.carpimtablosu.app.logic.LockReason
 import com.carpimtablosu.app.ui.components.BigButton
@@ -85,11 +91,31 @@ class LockOverlay(
     private var owner: OverlayOwner? = null
     private val state = mutableStateOf(LockMode.NO_TIME to "")
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val isTv = Platform.isTv(context)
+
+    /**
+     * Güvenlik: kilit ekranı hiçbir zaman kalıcı olarak takılı kalmaz. Bir süre dokunulmazsa
+     * kendiliğinden kapanır (kilitli uygulama zaten kapatılmış, arkada ana ekran vardır).
+     * Kumanda odak alamazsa veya bir hata olursa televizyon böylece kullanılamaz hale gelmez.
+     */
+    private val autoHide = Runnable {
+        if (root != null) {
+            DebugLog.log("Kilit ekranı süre aşımıyla kapandı")
+            hide()
+        }
+    }
+
+    private fun bumpTimeout() {
+        mainHandler.removeCallbacks(autoHide)
+        val ms = if (state.value.first == LockMode.PROTECT) PROTECT_TIMEOUT_MS else TIMEOUT_MS
+        mainHandler.postDelayed(autoHide, ms)
+    }
 
     val isShowing: Boolean get() = root != null
 
     fun show(mode: LockMode, pkg: String) {
         state.value = mode to (if (pkg.isEmpty()) "" else SystemAccess.appLabel(context, pkg))
+        bumpTimeout()
         if (root != null) return
         val o = OverlayOwner().also { it.start() }
         val compose = ComposeView(context).apply {
@@ -98,6 +124,7 @@ class LockOverlay(
             setContent {
                 val (m, label) = state.value
                 CarpimTheme {
+                    CompositionLocalProvider(LocalIsTv provides isTv) {
                     LockContent(
                         mode = m,
                         appLabel = label,
@@ -106,17 +133,24 @@ class LockOverlay(
                         onEmergency = { hideThen(onEmergency) },
                         onUnlocked = { hideThen {} },
                     )
+                    }
                 }
             }
         }
         // Geri tuşu ana ekrana götürür; kilitli uygulamaya dönülmez
         val frame = object : FrameLayout(context) {
             override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+                bumpTimeout()
                 if (event.keyCode == KeyEvent.KEYCODE_BACK) {
                     if (event.action == KeyEvent.ACTION_UP) hideThen(onHome)
                     return true
                 }
                 return super.dispatchKeyEvent(event)
+            }
+
+            override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+                bumpTimeout()
+                return super.dispatchTouchEvent(event)
             }
         }
         frame.setViewTreeLifecycleOwner(o)
@@ -154,6 +188,7 @@ class LockOverlay(
     }
 
     fun hide() {
+        mainHandler.removeCallbacks(autoHide)
         val r = root ?: return
         root = null
         runCatching { wm.removeViewImmediate(r) }.onFailure { DebugLog.error("Kilit ekranı kapatılamadı", it) }
@@ -162,6 +197,9 @@ class LockOverlay(
         DebugLog.log("Kilit ekranı kapandı")
     }
 }
+
+private const val TIMEOUT_MS = 45_000L
+private const val PROTECT_TIMEOUT_MS = 120_000L
 
 /** Compose'un servis penceresinde çalışması için gereken yaşam döngüsü sahibi. */
 private class OverlayOwner : LifecycleOwner, SavedStateRegistryOwner {
@@ -207,10 +245,17 @@ internal fun LockContent(
         LockMode.PROTECT -> "Bu ayar korunuyor" to "Bu ekranı açmak için ebeveyn şifresi gerekir."
     }
 
-    Column(
+    Box(
         Modifier
             .fillMaxSize()
-            .background(Palette.Bg)
+            .background(Palette.Bg),
+        contentAlignment = Alignment.Center,
+    ) {
+    Column(
+        Modifier
+            // TV'de düğmeler ekran boyunca uzamasın
+            .widthIn(max = 560.dp)
+            .fillMaxSize()
             .systemBarsPadding()
             .verticalScroll(rememberScrollState())
             .padding(24.dp),
@@ -224,6 +269,7 @@ internal fun LockContent(
         Text(body, style = MaterialTheme.typography.bodyLarge, color = Palette.TextDim, textAlign = TextAlign.Center)
         Spacer(Modifier.height(28.dp))
 
+        val isTv = LocalIsTv.current
         if (askPassword) {
             PasswordField("Ebeveyn şifresi", pw) { pw = it; error = null }
             ErrorText(error)
@@ -255,16 +301,26 @@ internal fun LockContent(
             BigButton("Ana ekrana dön", onHome, style = ButtonStyle.SECONDARY)
         } else {
             if (mode == LockMode.NO_TIME) {
-                BigButton("Soru çöz, süre kazan", onEarn, style = ButtonStyle.SUCCESS)
+                BigButton("Soru çöz, süre kazan", onEarn, style = ButtonStyle.SUCCESS, autoFocus = isTv)
                 Spacer(Modifier.height(10.dp))
             }
-            BigButton("Ana ekrana dön", onHome, style = ButtonStyle.SECONDARY)
-            Spacer(Modifier.height(16.dp))
-            TextButton(onClick = { askPassword = true }) {
-                Text("Ebeveyn: 30 dakika kilidi aç", color = Palette.Blue)
+            BigButton(
+                "Ana ekrana dön", onHome, style = ButtonStyle.SECONDARY,
+                autoFocus = isTv && mode != LockMode.NO_TIME,
+            )
+            // TV'de kilit katmanında ekran klavyesi açılmayabilir; ebeveyn kilidi
+            // uygulamanın ebeveyn panelinden kaldırır
+            if (!isTv) {
+                Spacer(Modifier.height(16.dp))
+                TextButton(onClick = { askPassword = true }) {
+                    Text("Ebeveyn: 30 dakika kilidi aç", color = Palette.Blue)
+                }
             }
         }
-        Spacer(Modifier.height(16.dp))
-        SmallButton("Acil arama (112)", Modifier.fillMaxWidth(), onEmergency)
+        if (!isTv) {
+            Spacer(Modifier.height(16.dp))
+            SmallButton("Acil arama (112)", Modifier.fillMaxWidth(), onEmergency)
+        }
     }
+}
 }

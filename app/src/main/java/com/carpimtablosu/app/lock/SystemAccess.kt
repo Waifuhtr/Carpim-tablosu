@@ -18,15 +18,56 @@ data class InstalledApp(val pkg: String, val label: String, val icon: Drawable?)
 /** Sistem ayarları ve izinlerle ilgili yardımcılar. */
 object SystemAccess {
 
-    /** Kilit listesine hiçbir zaman girmemesi gereken paketler (ayarlar, telefon). */
+    /**
+     * Hiçbir zaman kilitlenmeyecek paketler: ayarlar, telefon, sistem arayüzü ve TV'nin
+     * ana ekranı/girişleri. Bunlardan biri kilitlenirse cihaz kullanılamaz hale gelebilir
+     * (ör. ana ekran kilitlenirse sonsuz "ana ekrana dön" döngüsü olur).
+     */
     private val NEVER_LOCK = setOf(
+        "android",
+        "com.android.systemui",
         "com.android.settings",
         "com.android.phone",
         "com.android.dialer",
         "com.google.android.dialer",
         "com.samsung.android.dialer",
         "com.android.emergency",
+        // Android TV / Google TV
+        "com.android.tv.settings",
+        "com.google.android.tvlauncher",
+        "com.google.android.apps.tv.launcherx",
+        "com.google.android.leanbacklauncher",
+        "com.android.tv",
+        "com.google.android.tv",
+        "com.google.android.tvrecommendations",
+        "com.google.android.katniss",
+        "com.google.android.apps.tv.dreamx",
+        "com.android.providers.tv",
     )
+
+    /**
+     * Kilitlenmemesi gereken tüm paketler: sabit liste + bu cihazdaki ana ekran ve
+     * ayarlar uygulamaları (üreticiye göre değişir) + bu uygulama + varsayılan arama uygulaması.
+     */
+    fun neverLockPackages(context: Context): Set<String> {
+        val pm = context.packageManager
+        val out = NEVER_LOCK.toMutableSet()
+        out += context.packageName
+        runCatching { context.getSystemService(TelecomManager::class.java)?.defaultDialerPackage }.getOrNull()?.let { out += it }
+        val home = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
+        out += query(pm, home).map { it.activityInfo.packageName }
+        out += query(pm, Intent(Settings.ACTION_SETTINGS)).map { it.activityInfo.packageName }
+        return out
+    }
+
+    private fun query(pm: PackageManager, intent: Intent) = runCatching {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            pm.queryIntentActivities(intent, PackageManager.ResolveInfoFlags.of(0))
+        } else {
+            @Suppress("DEPRECATION")
+            pm.queryIntentActivities(intent, 0)
+        }
+    }.getOrDefault(emptyList())
 
     /** İçinde uygulamamızın adı görünürse şifre istenecek sistem ekranları. */
     val PROTECTED_PACKAGES = setOf(
@@ -96,21 +137,19 @@ object SystemAccess {
 
     fun needsRestrictedSettingsHint(): Boolean = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
 
-    /** Ana ekranda simgesi olan, kilitlenebilir uygulamalar. */
+    /**
+     * Ana ekranda simgesi olan, kilitlenebilir uygulamalar. Telefon uygulamaları LAUNCHER,
+     * TV uygulamaları LEANBACK_LAUNCHER kategorisindedir; ikisi de listelenir.
+     */
     fun launchableApps(context: Context): List<InstalledApp> {
         val pm = context.packageManager
-        val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-        val resolved = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            pm.queryIntentActivities(intent, PackageManager.ResolveInfoFlags.of(0))
-        } else {
-            @Suppress("DEPRECATION")
-            pm.queryIntentActivities(intent, 0)
-        }
-        val dialer = runCatching { context.getSystemService(TelecomManager::class.java)?.defaultDialerPackage }.getOrNull()
-        return resolved
+        val phone = query(pm, Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER))
+        val tv = query(pm, Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER))
+        val never = neverLockPackages(context)
+        return (tv + phone)
             .map { it.activityInfo.packageName to it }
             .distinctBy { it.first }
-            .filter { (pkg, _) -> pkg != context.packageName && pkg != dialer && pkg !in NEVER_LOCK }
+            .filter { (pkg, _) -> pkg !in never }
             .map { (pkg, info) ->
                 InstalledApp(pkg, info.loadLabel(pm).toString(), runCatching { info.loadIcon(pm) }.getOrNull())
             }

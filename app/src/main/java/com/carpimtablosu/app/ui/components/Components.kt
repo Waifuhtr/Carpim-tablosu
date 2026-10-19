@@ -41,6 +41,8 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.carpimtablosu.app.R
 import com.carpimtablosu.app.logic.BadgeIcon
+import com.carpimtablosu.app.ui.focusRing
+import com.carpimtablosu.app.ui.initialFocus
 import com.carpimtablosu.app.ui.theme.Palette
 
 /**
@@ -58,6 +60,8 @@ fun PressableSurface(
     depth: Dp = 4.dp,
     border: Color? = null,
     contentPadding: PaddingValues = PaddingValues(horizontal = 16.dp, vertical = 14.dp),
+    /** Tıklanabilir yüzeye uygulanır (ör. [initialFocus]). */
+    focusModifier: Modifier = Modifier,
     content: @Composable BoxScope.() -> Unit,
 ) {
     val interaction = remember { MutableInteractionSource() }
@@ -75,6 +79,8 @@ fun PressableSurface(
             Modifier
                 .offset(y = drop)
                 .fillMaxWidth()
+                .focusRing(shape)
+                .then(focusModifier)
                 .clip(shape)
                 .background(color)
                 .then(if (border != null) Modifier.border(2.dp, border, shape) else Modifier)
@@ -95,6 +101,9 @@ fun BigButton(
     modifier: Modifier = Modifier,
     style: ButtonStyle = ButtonStyle.PRIMARY,
     enabled: Boolean = true,
+    /** TV'de ekran açılınca odağı bu düğmeye ver. */
+    autoFocus: Boolean = false,
+    focusKey: Any? = Unit,
 ) {
     val s = if (enabled) style else ButtonStyle.DISABLED
     val (bg, sh, fg) = when (s) {
@@ -112,6 +121,7 @@ fun BigButton(
         enabled = enabled,
         border = if (s == ButtonStyle.SECONDARY) Palette.Outline else null,
         modifier = modifier.fillMaxWidth(),
+        focusModifier = Modifier.initialFocus(autoFocus && enabled, focusKey),
     ) {
         Text(text.uppercase(java.util.Locale.forLanguageTag("tr")), color = fg, style = MaterialTheme.typography.labelLarge)
     }
@@ -232,8 +242,10 @@ fun SettingSwitch(title: String, subtitle: String?, checked: Boolean, onChange: 
     Row(
         Modifier
             .fillMaxWidth()
+            .focusRing(RoundedCornerShape(12.dp))
+            .clip(RoundedCornerShape(12.dp))
             .clickable { onChange(!checked) }
-            .padding(vertical = 10.dp),
+            .padding(vertical = 10.dp, horizontal = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(Modifier.weight(1f)) {
@@ -241,9 +253,10 @@ fun SettingSwitch(title: String, subtitle: String?, checked: Boolean, onChange: 
             if (subtitle != null) Text(subtitle, style = MaterialTheme.typography.bodyMedium, color = Palette.TextDim)
         }
         Spacer(Modifier.width(12.dp))
+        // Satırın tamamı tıklanır; anahtar ayrıca odak almasın (kumandada tek durak)
         Switch(
             checked = checked,
-            onCheckedChange = onChange,
+            onCheckedChange = null,
             colors = SwitchDefaults.colors(
                 checkedThumbColor = Color.White,
                 checkedTrackColor = Palette.Green,
@@ -264,6 +277,7 @@ fun <T> ChoiceChips(options: List<Pair<T, String>>, selected: T, onSelect: (T) -
             Box(
                 Modifier
                     .weight(1f)
+                    .focusRing(RoundedCornerShape(12.dp))
                     .clip(RoundedCornerShape(12.dp))
                     .background(if (on) Palette.Blue.copy(alpha = 0.18f) else Palette.Surface)
                     .border(2.dp, if (on) Palette.Blue else Palette.Outline, RoundedCornerShape(12.dp))
@@ -290,9 +304,10 @@ fun NavRow(icon: BadgeIcon, tint: Color, title: String, subtitle: String?, onCli
     Row(
         Modifier
             .fillMaxWidth()
+            .focusRing(RoundedCornerShape(14.dp))
             .clip(RoundedCornerShape(14.dp))
             .clickable(onClick = onClick)
-            .padding(vertical = 10.dp),
+            .padding(vertical = 10.dp, horizontal = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(

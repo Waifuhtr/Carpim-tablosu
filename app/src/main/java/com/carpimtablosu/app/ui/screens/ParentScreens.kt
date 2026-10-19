@@ -86,7 +86,9 @@ import com.carpimtablosu.app.logic.TimeBank
 import com.carpimtablosu.app.lock.SystemAccess
 import com.carpimtablosu.app.ui.AppViewModel
 import com.carpimtablosu.app.ui.ParentSection
+import com.carpimtablosu.app.ui.LocalIsTv
 import com.carpimtablosu.app.ui.Screen
+import com.carpimtablosu.app.ui.focusRing
 import com.carpimtablosu.app.ui.components.BigButton
 import com.carpimtablosu.app.ui.components.ButtonStyle
 import com.carpimtablosu.app.ui.components.Card
@@ -709,6 +711,7 @@ private fun diagnosticsSummary(
         "Son karar: " + (st.lastDecision ?: "-"),
         "Bildirim izni: " + if (SystemAccess.notificationsAllowed(context)) "var" else "YOK",
         "Pil kısıtlaması yok: " + if (SystemAccess.isIgnoringBattery(context)) "evet" else "hayır",
+        "Platform: " + if (com.carpimtablosu.app.Platform.isTv(context)) "TV" else "telefon",
         "Cihaz: ${Build.MANUFACTURER} ${Build.MODEL}, Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}), uygulama $version",
     )
     return lines.joinToString("\n")
@@ -740,7 +743,26 @@ private fun SecurityScreen(vm: AppViewModel) {
             }
         }
         SectionTitle("Koruma")
-        Card {
+        if (LocalIsTv.current) {
+            Card {
+                Column {
+                    Text("TV'de koruma bilerek kapalı", style = MaterialTheme.typography.titleMedium, color = Palette.Text)
+                    Text(
+                        "Televizyonda ayar ve kaldırma koruması kullanılmaz. Böylece bir sorun olursa televizyonu " +
+                            "sıfırlamanız gerekmez: Ayarlar > Uygulamalar > Çarpım Tablosu > Kaldır her zaman çalışır; " +
+                            "kilit servisi Ayarlar > Erişilebilirlik bölümünden her zaman kapatılabilir.",
+                        color = Palette.TextDim,
+                    )
+                    if (adminOn) {
+                        Spacer(Modifier.height(8.dp))
+                        BigButton("Kaldırma korumasını kapat", {
+                            SystemAccess.removeAdmin(context)
+                            adminTick++
+                        }, style = ButtonStyle.SECONDARY)
+                    }
+                }
+            }
+        } else Card {
             Column {
                 SettingSwitch(
                     "Ayar koruması",
@@ -786,6 +808,13 @@ fun PermissionList(vm: AppViewModel) {
         ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
     }
 
+    val isTv = LocalIsTv.current
+    if (isTv) {
+        TvPermissionList(a11y, mic, onOpen = { safeStart(context, SystemAccess.accessibilitySettings()) }) {
+            micLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+        return
+    }
     Card {
         Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
             PermissionRow(
@@ -827,6 +856,50 @@ fun PermissionList(vm: AppViewModel) {
         }
     }
 }
+
+/** TV'de izinler: yalnızca kilit servisi ve (varsa) mikrofon; servis açılamazsa adb yedeği. */
+@Composable
+private fun TvPermissionList(a11y: Boolean, mic: Boolean, onOpen: () -> Unit, onMic: () -> Unit) {
+    val clipboard = LocalClipboardManager.current
+    var copied by remember { mutableStateOf(false) }
+    Card {
+        Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            PermissionRow(
+                "Erişilebilirlik servisi (zorunlu)",
+                "Kumandayla: Ayarlar > Sistem (veya Cihaz Tercihleri) > Erişilebilirlik > Çarpım Tablosu kilit servisi > Aç.",
+                a11y,
+                onOpen,
+            )
+            if (!a11y) {
+                Text(
+                    "Servis listede yoksa veya açılmıyorsa (bazı TV'ler dışarıdan yüklenen uygulamalarda bunu kısıtlar), " +
+                        "bilgisayardan TV'ye adb ile bağlanıp şu komutları sırayla çalıştırın. " +
+                        "Not: ikinci komut TV'de açık başka bir erişilebilirlik servisi varsa onu kapatır.",
+                    color = Palette.Amber, style = MaterialTheme.typography.bodyMedium,
+                )
+                SelectionContainer {
+                    Text(TV_ADB_SETUP, fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = Palette.Text)
+                }
+                SmallButton(if (copied) "Kopyalandı" else "Komutları kopyala", Modifier.fillMaxWidth()) {
+                    clipboard.setText(AnnotatedString(TV_ADB_SETUP))
+                    copied = true
+                }
+            }
+            PermissionRow("Mikrofon (isteğe bağlı)", "Sesli cevap için; kumandada mikrofon varsa çalışır.", mic, onMic)
+            Text(
+                "Acil çıkış: Bir sorun olursa Ayarlar > Uygulamalar > Çarpım Tablosu > Kaldır ile uygulama her zaman " +
+                    "kaldırılabilir. TV'de kaldırma ve ayar koruması bu yüzden kullanılmaz.",
+                color = Palette.TextDim, style = MaterialTheme.typography.bodyMedium,
+            )
+        }
+    }
+}
+
+private const val TV_ADB_SETUP =
+    "adb shell appops set com.carpimtablosu.app ACCESS_RESTRICTED_SETTINGS allow\n" +
+        "adb shell settings put secure enabled_accessibility_services " +
+        "com.carpimtablosu.app/com.carpimtablosu.app.lock.AppLockService\n" +
+        "adb shell settings put secure accessibility_enabled 1"
 
 @Composable
 private fun PermissionRow(title: String, desc: String, ok: Boolean, onFix: () -> Unit) {
@@ -902,6 +975,7 @@ fun AppPicker(vm: AppViewModel, modifier: Modifier = Modifier) {
                     Row(
                         Modifier
                             .fillMaxWidth()
+                            .focusRing(RoundedCornerShape(12.dp))
                             .clip(RoundedCornerShape(12.dp))
                             .clickable {
                                 vm.repo.updateSettings {
@@ -995,10 +1069,14 @@ fun RecoveryCodeView(code: String, onContinue: () -> Unit) {
         }
         Spacer(Modifier.height(12.dp))
         Row(
-            Modifier.fillMaxWidth().clickable { noted = !noted },
+            Modifier
+                .fillMaxWidth()
+                .focusRing(RoundedCornerShape(12.dp))
+                .clip(RoundedCornerShape(12.dp))
+                .clickable { noted = !noted },
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Checkbox(checked = noted, onCheckedChange = { noted = it })
+            Checkbox(checked = noted, onCheckedChange = null, modifier = Modifier.padding(12.dp))
             Text("Kodu bir yere yazdım", color = Palette.Text)
         }
         Spacer(Modifier.height(8.dp))
@@ -1065,6 +1143,7 @@ fun ScreenScaffold(
                 Box(
                     Modifier
                         .size(44.dp)
+                        .focusRing(RoundedCornerShape(12.dp))
                         .clip(RoundedCornerShape(12.dp))
                         .clickable(onClick = onBack),
                     contentAlignment = Alignment.Center,
@@ -1089,6 +1168,7 @@ fun ScreenScaffold(
 fun SmallButton(text: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
     Box(
         modifier
+            .focusRing(RoundedCornerShape(12.dp))
             .clip(RoundedCornerShape(12.dp))
             .background(Palette.SurfaceHigh)
             .border(2.dp, Palette.Outline, RoundedCornerShape(12.dp))

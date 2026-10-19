@@ -10,3 +10,4 @@ build/
 *.apk
 !app/debug.keystore
 /screenshots
+.kotlin/

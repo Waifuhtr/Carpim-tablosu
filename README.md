@@ -62,6 +62,29 @@ Ebeveyn panelinden bu değerler, günlük kazanma sınırı (varsayılan 60 dk) 
 
 **Kilit çalışmıyorsa:** Ebeveyn paneli → **Tanılama ve kayıtlar**. Bu ekran servisin çalışıp çalışmadığını, kilitli uygulamaları ve kalan süreyi gösterir. "Kilit ekranını dene" ile kilit ekranını test edebilir, "Kayıtları kopyala" ile ayrıntılı kaydı kopyalayıp geliştiriciye gönderebilirsiniz.
 
+## Android TV
+
+Aynı APK Android TV / Google TV'de de çalışır. TV algılanınca arayüz yatay düzene ve kumanda kullanımına geçer: odaklanan düğme çerçeveyle belirginleşir, ders ekranında solda soru, sağda cevaplar bulunur, kumandanın rakam tuşlarıyla cevap yazılabilir.
+
+**Kurulum**
+1. TV'de *Ayarlar → Cihaz Tercihleri (veya Sistem) → Güvenlik ve kısıtlamalar → Bilinmeyen kaynaklar* bölümünden APK'yı kuracak uygulamaya izin verin.
+2. APK'yı kurun. Seçenekler: "Downloader" uygulamasına yukarıdaki indirme linkini yazın, USB bellekle kurun ya da bilgisayardan `adb install CarpimTablosu.apk` çalıştırın.
+3. Uygulamayı açıp kurulumu tamamlayın. Kilit servisi için: *Ayarlar → Sistem/Cihaz Tercihleri → Erişilebilirlik → Çarpım Tablosu kilit servisi → Aç*.
+4. Servis listede yoksa veya açılmıyorsa bilgisayardan şu komutları çalıştırın (ikinci komut TV'de açık başka bir erişilebilirlik servisi varsa onu kapatır):
+   ```
+   adb shell appops set com.carpimtablosu.app ACCESS_RESTRICTED_SETTINGS allow
+   adb shell settings put secure enabled_accessibility_services com.carpimtablosu.app/com.carpimtablosu.app.lock.AppLockService
+   adb shell settings put secure accessibility_enabled 1
+   ```
+
+**Televizyonu kilitlememek için alınan önlemler**
+- Ana ekran, Ayarlar, sistem arayüzü ve TV girişleri **asla kilitlenmez**. Bunlar hem seçim listesine gelmez hem de servis karar verirken ikinci kez kontrol edilir.
+- Kilit ekranı 45 saniye işlem yapılmazsa **kendiliğinden kapanır**. Geri tuşu her zaman ana ekrana götürür.
+- Kısa sürede çok fazla kilit tetiklenirse (bir hata durumunda) **güvenlik freni** kilidi 1 dakika durdurur.
+- TV'de **ayar koruması ve kaldırma koruması kullanılmaz**. Bir sorun olursa *Ayarlar → Uygulamalar → Çarpım Tablosu → Kaldır* her zaman çalışır; kilit servisi *Erişilebilirlik* bölümünden her zaman kapatılabilir. Bilgisayardan `adb uninstall com.carpimtablosu.app` da her zaman çalışır.
+- Kilit ekranında ebeveyn şifresi istenmez (TV klavyesi orada açılmayabilir). Ebeveyn, kilidi uygulamanın Ebeveyn paneli'nden kaldırır.
+- TV'de kayıtları görmek için: `adb logcat -s Carpim`.
+
 ## Bilinen sınırlar
 
 - Android, süreci kapanan bir erişilebilirlik servisini kendiliğinden yeniden başlatmaz; ayarlarda "Bu hizmet hatalı çalışıyor" yazar. Bunu azaltmak için kilit servisi ekranlardan ayrı bir süreçte çalışır. Xiaomi/Redmi/POCO'da ayrıca **Otomatik başlatma** açılmalı ve uygulama Son uygulamalar ekranında kilitlenmelidir.
@@ -77,7 +100,7 @@ Ebeveyn panelinden bu değerler, günlük kazanma sınırı (varsayılan 60 dk) 
 - Kotlin, Jetpack Compose, minSdk 26 (Android 8.0), targetSdk 35
 - Derleme: `./gradlew assembleRelease` → `app/build/outputs/apk/release/app-release.apk`
 - Testler: `./gradlew testDebugUnitTest` (mantık katmanı ve Robolectric ile kayıt/akış testleri)
-- Ekran görüntüleri: `./gradlew testDebugUnitTest -Pshots` → `screenshots/`
+- Ekran görüntüleri: `./gradlew testDebugUnitTest -Pshots` → `screenshots/` (TV görüntüleri `screenshots/tv/`)
 - CI: `.github/workflows/android.yml` (test → lint → APK → Release)
 
 ### İmza anahtarı

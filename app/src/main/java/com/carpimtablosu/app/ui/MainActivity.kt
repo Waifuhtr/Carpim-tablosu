@@ -1,5 +1,7 @@
 package com.carpimtablosu.app.ui
 
+import android.annotation.SuppressLint
+import android.content.pm.ActivityInfo
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -12,11 +14,16 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import com.carpimtablosu.app.Platform
 import com.carpimtablosu.app.ui.screens.HomeScreen
 import com.carpimtablosu.app.ui.screens.LessonScreen
 import com.carpimtablosu.app.ui.screens.OnboardingScreen
@@ -35,12 +42,16 @@ class MainActivity : ComponentActivity() {
     private val vm: AppViewModel by viewModels()
     private lateinit var media: MediaTools
 
+    @SuppressLint("SourceLockedOrientationActivity") // telefon arayüzü dikey tasarlandı
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        val isTv = Platform.isTv(this)
+        // TV her zaman yataydır; yalnızca telefonda dikey yöne sabitlenir
+        if (!isTv) requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
         media = MediaTools(Speaker(this), Listener(this), Sounds())
         setContent {
             CarpimTheme {
-                CompositionLocalProvider(LocalMedia provides media) {
+                CompositionLocalProvider(LocalMedia provides media, LocalIsTv provides isTv) {
                     AppRoot(vm, onExit = { finish() })
                 }
             }
@@ -73,16 +84,22 @@ fun AppRoot(vm: AppViewModel, onExit: () -> Unit) {
     BackHandler(enabled = screen !is Screen.Lesson) {
         if (screen is Screen.Result) vm.goHome() else if (!vm.back()) onExit()
     }
+    val isTv = LocalIsTv.current
     Box(
         Modifier
             .fillMaxSize()
             .background(Palette.Bg)
             .systemBarsPadding()
+            // TV güvenli alanı: bazı televizyonlar ekran kenarlarını keser
+            .then(if (isTv) Modifier.padding(horizontal = 48.dp, vertical = 24.dp) else Modifier),
+        contentAlignment = Alignment.TopCenter,
     ) {
         AnimatedContent(
             targetState = screen,
             transitionSpec = { fadeIn() togetherWith fadeOut() },
             label = "screen",
+            // TV'de ders ekranı tüm genişliği kullanır; diğerleri ortada okunaklı genişlikte
+            modifier = if (isTv && screen !is Screen.Lesson) Modifier.widthIn(max = 760.dp) else Modifier,
         ) { s ->
             when (s) {
                 Screen.Onboarding -> OnboardingScreen(vm)

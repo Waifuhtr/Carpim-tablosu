@@ -57,7 +57,10 @@ import com.carpimtablosu.app.logic.ProgressOps
 import com.carpimtablosu.app.logic.Srs
 import com.carpimtablosu.app.ui.AppViewModel
 import com.carpimtablosu.app.ui.HomeTab
+import com.carpimtablosu.app.ui.LocalIsTv
 import com.carpimtablosu.app.ui.Screen
+import com.carpimtablosu.app.ui.focusRing
+import com.carpimtablosu.app.ui.initialFocus
 import com.carpimtablosu.app.ui.components.BigButton
 import com.carpimtablosu.app.ui.components.ButtonStyle
 import com.carpimtablosu.app.ui.components.Card
@@ -118,6 +121,7 @@ private fun TopBar(streak: Int, xp: Int, bankSec: Long, onParent: () -> Unit) {
         Box(
             Modifier
                 .size(40.dp)
+                .focusRing(RoundedCornerShape(12.dp))
                 .clip(RoundedCornerShape(12.dp))
                 .background(Palette.Surface)
                 .clickable(onClick = onParent),
@@ -163,6 +167,7 @@ private fun BottomNav(selected: HomeTab, onSelect: (HomeTab) -> Unit) {
             val on = tab == selected
             Column(
                 Modifier
+                    .focusRing(RoundedCornerShape(14.dp))
                     .clip(RoundedCornerShape(14.dp))
                     .border(2.dp, if (on) Palette.Blue else Color.Transparent, RoundedCornerShape(14.dp))
                     .background(if (on) Palette.Blue.copy(alpha = 0.12f) else Color.Transparent)
@@ -313,6 +318,7 @@ private fun UnitNodes(
     current: Pair<Int, Int>?,
     onClick: (Int, NodeState) -> Unit,
 ) {
+    val isTv = LocalIsTv.current
     val colors = Palette.Units[index % Palette.Units.size]
     val offsets = listOf(0.dp, 56.dp, 0.dp, (-56).dp)
     val mascotLeft = index % 2 == 0
@@ -342,7 +348,9 @@ private fun UnitNodes(
                     Modifier.offset(x = x).padding(vertical = 6.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
-                    PathNode(state, n == Curriculum.BOSS_NODE, colors) { onClick(n, state) }
+                    PathNode(state, n == Curriculum.BOSS_NODE, colors, autoFocus = isTv && state == NodeState.CURRENT) {
+                        onClick(n, state)
+                    }
                     Text(
                         Curriculum.nodeTitle(n),
                         style = MaterialTheme.typography.bodyMedium,
@@ -356,7 +364,13 @@ private fun UnitNodes(
 }
 
 @Composable
-private fun PathNode(state: NodeState, boss: Boolean, colors: Pair<Color, Color>, onClick: () -> Unit) {
+private fun PathNode(
+    state: NodeState,
+    boss: Boolean,
+    colors: Pair<Color, Color>,
+    autoFocus: Boolean = false,
+    onClick: () -> Unit,
+) {
     val (top, shadow) = when (state) {
         NodeState.DONE -> Palette.Amber to Palette.AmberDark
         NodeState.CURRENT, NodeState.OPEN -> colors
@@ -399,6 +413,8 @@ private fun PathNode(state: NodeState, boss: Boolean, colors: Pair<Color, Color>
                 Modifier
                     .offset(y = if (pressed) 6.dp else 0.dp)
                     .size(78.dp)
+                    .focusRing(CircleShape)
+                    .initialFocus(autoFocus)
                     .clip(CircleShape)
                     .background(top)
                     .clickable(interactionSource = interaction, indication = null, onClick = onClick),
@@ -466,6 +482,7 @@ private fun PracticeTab(vm: AppViewModel, progress: Progress) {
                     Box(
                         Modifier
                             .weight(1f)
+                            .focusRing(RoundedCornerShape(16.dp))
                             .clip(RoundedCornerShape(16.dp))
                             .background(Palette.Surface)
                             .border(2.dp, if (m >= 0.8f) Palette.Amber else Palette.Outline, RoundedCornerShape(16.dp))
