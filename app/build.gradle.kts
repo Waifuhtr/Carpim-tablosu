@@ -71,6 +71,9 @@ android {
         unitTests {
             isIncludeAndroidResources = true
             all {
+                // Her test sınıfı ayrı JVM'de: Robolectric testleri arasında biriken durum
+                // (ör. Compose testlerinin hiç durulmaması) sonraki testleri etkilemesin
+                it.forkEvery = 1
                 // Ekran görüntüsü üretmek için: ./gradlew testDebugUnitTest -Pshots
                 it.systemProperty("shots", if (project.hasProperty("shots")) "true" else "false")
                 it.systemProperty("roborazzi.test.record", if (project.hasProperty("shots")) "true" else "false")
