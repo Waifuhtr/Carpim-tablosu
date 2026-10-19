@@ -64,6 +64,38 @@ class RepositoryTest {
         assertFalse(repo.settings.value.onboarded)
     }
 
+    @Test fun legacyDataIsMigrated() {
+        java.io.File(context.filesDir, "veri").deleteRecursively()
+        context.getSharedPreferences("carpim", Context.MODE_PRIVATE).edit()
+            .putString("progress", """{"childName":"Ece","xp":42}""")
+            .putString("time", """{"bankSec":300}""")
+            .putString("pw_salt", com.carpimtablosu.app.logic.Password.encode(byteArrayOf(1, 2, 3)))
+            .putString("pw_hash", com.carpimtablosu.app.logic.Password.encode(
+                com.carpimtablosu.app.logic.Password.hash("Eski1234", byteArrayOf(1, 2, 3))
+            ))
+            .commit()
+        val repo = fresh()
+        assertEquals("Ece", repo.progress.value.childName)
+        assertEquals(42, repo.progress.value.xp)
+        assertEquals(300, repo.time.value.bankSec)
+        assertTrue(repo.hasPassword())
+        assertEquals(PasswordCheck.Ok, repo.checkPassword("Eski1234"))
+    }
+
+    @Test fun twoInstancesSeeEachOthersWrites() {
+        // Ekran ve kilit servisi ayrı süreçlerde ayrı Repository kullanır
+        val ui = fresh()
+        val lock = fresh()
+        ui.adjustTime(120)
+        assertEquals(60, lock.spend(60))
+        ui.recordAnswer("2x2", true)
+        lock.refresh()
+        assertEquals(120, lock.time.value.bankSec)
+        ui.updateSettings { it.copy(lockedApps = setOf("a.b")) }
+        lock.refresh()
+        assertEquals(setOf("a.b"), lock.settings.value.lockedApps)
+    }
+
     @Test fun spendingNeverGoesNegative() {
         val repo = fresh()
         repo.adjustTime(90)
@@ -84,7 +116,9 @@ class RepositoryTest {
         // Kilitliyken doğru şifre bile beklemeli
         assertTrue(repo.checkPassword("Baba1234") is PasswordCheck.LockedOut)
         // Kurtarma kodu da kilide tabi; kilit kalkınca çalışır
-        context.getSharedPreferences("carpim", Context.MODE_PRIVATE).edit().putLong("pw_lockout", 0L).commit()
+        val secFile = java.io.File(context.filesDir, "veri/guvenlik.json")
+        val sec = Repository.json.decodeFromString(com.carpimtablosu.app.data.Security.serializer(), secFile.readText())
+        secFile.writeText(Repository.json.encodeToString(com.carpimtablosu.app.data.Security.serializer(), sec.copy(lockoutUntil = 0L)))
         assertEquals(PasswordCheck.Ok, repo.checkRecovery(code.lowercase()))
         repo.setPassword("Yeni5678")
         assertTrue(repo.checkPassword("Baba1234") is PasswordCheck.Wrong)

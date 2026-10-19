@@ -2,6 +2,8 @@ package com.carpimtablosu.app.lock
 
 import android.content.Context
 import android.graphics.PixelFormat
+import android.os.Handler
+import android.os.Looper
 import android.view.KeyEvent
 import android.view.WindowManager
 import android.widget.FrameLayout
@@ -82,6 +84,7 @@ class LockOverlay(
     private var root: FrameLayout? = null
     private var owner: OverlayOwner? = null
     private val state = mutableStateOf(LockMode.NO_TIME to "")
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     val isShowing: Boolean get() = root != null
 
@@ -98,10 +101,10 @@ class LockOverlay(
                     LockContent(
                         mode = m,
                         appLabel = label,
-                        onEarn = { hide(); onEarn() },
-                        onHome = { hide(); onHome() },
-                        onEmergency = { hide(); onEmergency() },
-                        onUnlocked = { hide() },
+                        onEarn = { hideThen(onEarn) },
+                        onHome = { hideThen(onHome) },
+                        onEmergency = { hideThen(onEmergency) },
+                        onUnlocked = { hideThen {} },
                     )
                 }
             }
@@ -110,10 +113,7 @@ class LockOverlay(
         val frame = object : FrameLayout(context) {
             override fun dispatchKeyEvent(event: KeyEvent): Boolean {
                 if (event.keyCode == KeyEvent.KEYCODE_BACK) {
-                    if (event.action == KeyEvent.ACTION_UP) {
-                        hide()
-                        onHome()
-                    }
+                    if (event.action == KeyEvent.ACTION_UP) hideThen(onHome)
                     return true
                 }
                 return super.dispatchKeyEvent(event)
@@ -139,6 +139,17 @@ class LockOverlay(
         } catch (e: RuntimeException) {
             o.stop()
             DebugLog.error("Kilit ekranı gösterilemedi", e)
+        }
+    }
+
+    /**
+     * Pencereyi, içindeki tıklama işlenirken kaldırmak Compose'u çökertebilir;
+     * bu yüzden kaldırma bir sonraki döngüye ertelenir.
+     */
+    private fun hideThen(action: () -> Unit) {
+        mainHandler.post {
+            hide()
+            action()
         }
     }
 

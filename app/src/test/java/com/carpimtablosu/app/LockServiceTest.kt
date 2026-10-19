@@ -45,7 +45,7 @@ class LockServiceTest {
     private fun idle(sec: Long) = shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(sec))
 
     @Test fun lockedAppWithoutTimeShowsLockScreen() {
-        assertTrue(AppLockService.connected)
+        assertTrue(app.repo.serviceStatus().connected)
         open(yt)
         assertTrue(service.isLockShowing)
         assertTrue(DebugLog.read().contains("KİLİT: $yt"))
@@ -57,12 +57,12 @@ class LockServiceTest {
     }
 
     @Test fun timeIsSpentThenAppLocks() {
-        app.repo.adjustTime(5)
+        app.repo.adjustTime(8)
         open(yt)
         assertFalse(service.isLockShowing)
-        idle(3)
-        assertTrue(app.repo.time.value.bankSec in 1..3)
-        idle(5)
+        idle(6)
+        assertTrue(app.repo.time.value.bankSec in 1..3) // birkaç saniyede bir toplu düşülür
+        idle(6)
         assertEquals(0, app.repo.time.value.bankSec)
         assertTrue(service.isLockShowing)
     }
@@ -83,7 +83,7 @@ class LockServiceTest {
         app.repo.adjustTime(100)
         open(yt)
         open("com.android.systemui")
-        idle(4)
+        idle(7)
         assertTrue(app.repo.time.value.bankSec < 100)
     }
 }

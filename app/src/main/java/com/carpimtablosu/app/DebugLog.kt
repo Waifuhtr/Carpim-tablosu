@@ -16,9 +16,12 @@ object DebugLog {
     private val fmt = DateTimeFormatter.ofPattern("MM-dd HH:mm:ss")
 
     @Volatile private var file: File? = null
+    /** Hangi süreçten yazıldığı: "ekran" veya "kilit". */
+    @Volatile private var tag = "?"
 
-    fun init(context: Context) {
+    fun init(context: Context, processTag: String) {
         file = File(context.filesDir, "kayit.txt")
+        tag = processTag
     }
 
     fun log(msg: String) {
@@ -30,7 +33,7 @@ object DebugLog {
                     val keep = f.readText().takeLast((MAX_BYTES / 2).toInt())
                     f.writeText(keep.substringAfter('\n'))
                 }
-                f.appendText("${LocalDateTime.now().format(fmt)}  $msg\n")
+                f.appendText("${LocalDateTime.now().format(fmt)} [$tag] $msg\n")
             }
         }
     }
@@ -38,6 +41,17 @@ object DebugLog {
     fun error(msg: String, e: Throwable) {
         Log.e(TAG, msg, e)
         log("HATA: $msg: ${e.javaClass.simpleName}: ${e.message}")
+    }
+
+    /** Çökmeleri yığın iziyle kaydeder, sonra sistemin varsayılan davranışına bırakır. */
+    fun installCrashHandler() {
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, e ->
+            runCatching {
+                log("ÇÖKME (${thread.name}): ${e.javaClass.name}: ${e.message}\n" + Log.getStackTraceString(e).take(4000))
+            }
+            previous?.uncaughtException(thread, e)
+        }
     }
 
     /** Son [maxLines] satır. */

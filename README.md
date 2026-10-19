@@ -64,6 +64,9 @@ Ebeveyn panelinden bu değerler, günlük kazanma sınırı (varsayılan 60 dk) 
 
 ## Bilinen sınırlar
 
+- Android, süreci kapanan bir erişilebilirlik servisini kendiliğinden yeniden başlatmaz; ayarlarda "Bu hizmet hatalı çalışıyor" yazar. Bunu azaltmak için kilit servisi ekranlardan ayrı bir süreçte çalışır. Xiaomi/Redmi/POCO'da ayrıca **Otomatik başlatma** açılmalı ve uygulama Son uygulamalar ekranında kilitlenmelidir.
+- İsteğe bağlı otomatik onarım için bilgisayardan bir kez şu komutu verin: `adb shell pm grant com.carpimtablosu.app android.permission.WRITE_SECURE_SETTINGS`. Servis durursa uygulama onu kendisi yeniden açar.
+
 - Kilit, Android'in erişilebilirlik servisiyle çalışır. Telefonu güvenli modda başlatmak üçüncü taraf servisleri kapatır. Bu, hiçbir normal uygulamanın engelleyemeyeceği bir Android davranışıdır.
 - Ayar koruması, Ayarlar'da uygulamanın adının geçtiği her sayfada şifre ister (örneğin tüm uygulamalar listesi).
 - Telefonun saati elle ileri alınırsa günlük sayaçlar (seri, günlük sınır) etkilenebilir. Kullanım süresi ise saatten bağımsız ölçülür.

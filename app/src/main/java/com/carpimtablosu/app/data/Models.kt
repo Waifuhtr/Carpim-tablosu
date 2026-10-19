@@ -83,3 +83,25 @@ data class Backup(
     val format: Int = 1,
     val progress: Progress,
 )
+
+/** Ebeveyn şifresi ve kurtarma kodu özetleri (düz metin saklanmaz). */
+@Serializable
+data class Security(
+    val pwSalt: String? = null,
+    val pwHash: String? = null,
+    val rcSalt: String? = null,
+    val rcHash: String? = null,
+    val fails: Int = 0,
+    val lockoutUntil: Long = 0L,
+)
+
+/** Kilit servisinin kendi sürecinden yazdığı durum; ekran tarafı tanılama için okur. */
+@Serializable
+data class ServiceStatus(
+    val connected: Boolean = false,
+    /** Son canlılık sinyali (epoch ms). */
+    val heartbeat: Long = 0L,
+    val lastForeground: String? = null,
+    val lastDecision: String? = null,
+    val pid: Int = 0,
+)

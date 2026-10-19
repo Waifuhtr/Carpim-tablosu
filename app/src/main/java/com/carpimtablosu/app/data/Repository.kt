@@ -1,8 +1,7 @@
 package com.carpimtablosu.app.data
 
-import android.annotation.SuppressLint
 import android.content.Context
-import android.util.Log
+import android.os.FileObserver
 import com.carpimtablosu.app.DebugLog
 import com.carpimtablosu.app.logic.Achievement
 import com.carpimtablosu.app.logic.Achievements
@@ -15,6 +14,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.json.Json
+import java.io.File
 import java.time.LocalDate
 import java.time.LocalTime
 
@@ -25,43 +25,70 @@ sealed interface PasswordCheck {
 }
 
 /**
- * Uygulamanın tek veri kaynağı. Her şey telefonda (SharedPreferences) saklanır;
- * sunucu yoktur. Tüm yazmalar tek kilit altında yapılır, böylece kilit servisi ile
- * ekran aynı anda süreyi değiştirse bile değer bozulmaz.
+ * Uygulamanın tek veri kaynağı. Her şey telefonda saklanır; sunucu yoktur.
+ *
+ * Ekran ve kilit servisi ayrı süreçlerde çalışır. Veriler [FileStore] ile süreçler
+ * arası dosya kilidi altında yazılır; diğer sürecin yaptığı değişiklikler FileObserver
+ * ile algılanıp akışlara (StateFlow) yansıtılır.
  */
 class Repository(context: Context) {
-    private val prefs = context.applicationContext.getSharedPreferences("carpim", Context.MODE_PRIVATE)
-    private val lock = Any()
+    private val store = FileStore(File(context.applicationContext.filesDir, "veri"))
+    private val legacy = context.applicationContext.getSharedPreferences("carpim", Context.MODE_PRIVATE)
 
-    private val _progress = MutableStateFlow(load(KEY_PROGRESS, Progress.serializer()) ?: Progress())
-    private val _settings = MutableStateFlow(load(KEY_SETTINGS, Settings.serializer()) ?: Settings())
-    private val _time = MutableStateFlow(load(KEY_TIME, TimeState.serializer()) ?: TimeState())
+    private val _progress = MutableStateFlow(loadOrMigrate(PROGRESS, Progress.serializer(), "progress") { Progress() })
+    private val _settings = MutableStateFlow(loadOrMigrate(SETTINGS, Settings.serializer(), "settings") { Settings() })
+    private val _time = MutableStateFlow(loadOrMigrate(TIME, TimeState.serializer(), "time") { TimeState() })
 
     val progress: StateFlow<Progress> = _progress.asStateFlow()
     val settings: StateFlow<Settings> = _settings.asStateFlow()
     val time: StateFlow<TimeState> = _time.asStateFlow()
 
+    // Diğer süreç yazınca yeniden oku. Referans tutulmalı, yoksa çöp toplayıcı izlemeyi durdurur.
+    @Suppress("DEPRECATION")
+    private val observer = object : FileObserver(store.dir.path, MOVED_TO or CLOSE_WRITE) {
+        override fun onEvent(event: Int, path: String?) {
+            when (path) {
+                PROGRESS -> reloadProgress()
+                SETTINGS -> reloadSettings()
+                TIME -> reloadTime()
+            }
+        }
+    }.also { it.startWatching() }
+
+    init {
+        migrateSecurity()
+    }
+
     fun today(): LocalDate = LocalDate.now()
     fun minuteOfDay(): Int = LocalTime.now().let { it.hour * 60 + it.minute }
 
-    // ---------- genel güncelleme ----------
-
-    fun updateProgress(f: (Progress) -> Progress) = synchronized(lock) {
-        val n = f(_progress.value)
-        if (n != _progress.value) {
-            _progress.value = n
-            save(KEY_PROGRESS, Progress.serializer(), n)
-        }
+    /** Diskteki son hali okur (kilit servisi karar vermeden önce çağırır). */
+    fun refresh() {
+        reloadSettings()
+        reloadTime()
     }
 
-    fun updateSettings(f: (Settings) -> Settings) = synchronized(lock) {
-        val old = _settings.value
-        val n = f(old)
-        if (n != old) {
-            logSettingsChange(old, n)
-            _settings.value = n
-            save(KEY_SETTINGS, Settings.serializer(), n)
-        }
+    private fun reloadProgress() { store.read(PROGRESS, Progress.serializer())?.let { _progress.value = it } }
+    private fun reloadSettings() { store.read(SETTINGS, Settings.serializer())?.let { _settings.value = it } }
+    private fun reloadTime() { store.read(TIME, TimeState.serializer())?.let { _time.value = it } }
+
+    // ---------- genel güncelleme ----------
+
+    fun updateProgress(f: (Progress) -> Progress) {
+        _progress.value = store.update(PROGRESS, Progress.serializer(), ::Progress, f)
+    }
+
+    fun updateSettings(f: (Settings) -> Settings) {
+        var old: Settings? = null
+        val n = store.update(SETTINGS, Settings.serializer(), ::Settings) { cur -> old = cur; f(cur) }
+        old?.let { logSettingsChange(it, n) }
+        _settings.value = n
+    }
+
+    private fun updateTime(f: (TimeState) -> TimeState): TimeState {
+        val n = store.update(TIME, TimeState.serializer(), ::TimeState, f)
+        _time.value = n
+        return n
     }
 
     private fun logSettingsChange(old: Settings, n: Settings) {
@@ -75,26 +102,18 @@ class Repository(context: Context) {
         if (parts.isNotEmpty()) DebugLog.log("Ayar değişti: " + parts.joinToString(", "))
     }
 
-    private fun updateTime(f: (TimeState) -> TimeState) = synchronized(lock) {
-        val n = f(_time.value)
-        if (n != _time.value) {
-            _time.value = n
-            save(KEY_TIME, TimeState.serializer(), n)
-        }
-    }
-
     // ---------- öğrenme ----------
 
     data class AnswerOutcome(val deltaSec: Long, val capReached: Boolean)
 
     /** Bir cevabı kaydeder ve süre bankasını günceller. */
-    fun recordAnswer(factKey: String, correct: Boolean): AnswerOutcome = synchronized(lock) {
-        val s = _settings.value
+    fun recordAnswer(factKey: String, correct: Boolean): AnswerOutcome {
+        val s = store.read(SETTINGS, Settings.serializer()) ?: _settings.value
         val today = today()
         updateProgress { ProgressOps.recordAnswer(it, factKey, correct, System.currentTimeMillis(), today, s.dailyGoal) }
         var delta = 0L
         var capReached = false
-        updateTime { t ->
+        val t = updateTime { t ->
             if (correct) {
                 val (n, gain) = TimeBank.reward(t, s.rewardSec, s.dailyEarnCapSec, today.toString())
                 delta = gain
@@ -107,39 +126,36 @@ class Repository(context: Context) {
             }
         }
         if (delta != 0L) updateProgress { ProgressOps.recordTime(it, today, earnedSec = delta) }
-        DebugLog.log("Cevap ${if (correct) "doğru" else "yanlış"} ($factKey): süre ${if (delta >= 0) "+" else ""}${delta}sn → ${_time.value.bankSec}sn")
-        AnswerOutcome(delta, capReached)
+        DebugLog.log("Cevap ${if (correct) "doğru" else "yanlış"} ($factKey): süre ${if (delta >= 0) "+" else ""}${delta}sn → ${t.bankSec}sn")
+        return AnswerOutcome(delta, capReached)
     }
 
     /** Ders bitti: ilerlemeyi işler, yeni rozetleri döndürür. */
-    fun finishLesson(state: LessonState): List<Achievement> = synchronized(lock) {
+    fun finishLesson(state: LessonState): List<Achievement> {
         var fresh: List<Achievement> = emptyList()
         updateProgress { p ->
             val (n, f) = Achievements.unlockNew(ProgressOps.completeLesson(p, state))
             fresh = f
             n
         }
-        fresh
+        return fresh
     }
 
     fun setChildName(name: String) = updateProgress { it.copy(childName = name.trim().take(20)) }
 
-    fun resetProgress() = synchronized(lock) {
-        val name = _progress.value.childName
-        updateProgress { Progress(childName = name) }
-    }
+    fun resetProgress() = updateProgress { Progress(childName = it.childName) }
 
     // ---------- süre ----------
 
     /** Kilitli uygulamada geçen süreyi düşer; gerçekten düşülen saniyeyi döndürür. */
-    fun spend(sec: Long): Long = synchronized(lock) {
+    fun spend(sec: Long): Long {
         var used = 0L
         updateTime { t ->
             val (n, u) = TimeBank.spend(TimeBank.rollDay(t, today().toString()), sec)
             used = u
             n
         }
-        used
+        return used
     }
 
     fun recordSpent(sec: Long) {
@@ -147,8 +163,8 @@ class Repository(context: Context) {
     }
 
     fun adjustTime(deltaSec: Long) {
-        updateTime { TimeBank.adjust(it, deltaSec) }
-        DebugLog.log("Ebeveyn süreyi değiştirdi: ${deltaSec}sn → ${_time.value.bankSec}sn")
+        val t = updateTime { TimeBank.adjust(it, deltaSec) }
+        DebugLog.log("Ebeveyn süreyi değiştirdi: ${deltaSec}sn → ${t.bankSec}sn")
     }
 
     fun clearTime() {
@@ -156,55 +172,73 @@ class Repository(context: Context) {
         DebugLog.log("Ebeveyn süreyi sıfırladı")
     }
 
+    // ---------- kilit servisi durumu ----------
+
+    fun serviceStatus(): ServiceStatus = store.read(STATUS, ServiceStatus.serializer()) ?: ServiceStatus()
+
+    fun writeServiceStatus(status: ServiceStatus) {
+        runCatching { store.withLock(STATUS) { store.write(STATUS, ServiceStatus.serializer(), status) } }
+            .onFailure { DebugLog.error("Servis durumu yazılamadı", it) }
+    }
+
     // ---------- ebeveyn şifresi ----------
 
-    fun hasPassword(): Boolean = prefs.contains(KEY_PW_HASH)
+    private fun security(): Security = store.read(SECURITY, Security.serializer()) ?: Security()
+
+    fun hasPassword(): Boolean = security().pwHash != null
 
     /** Yeni şifreyi kaydeder ve yeni kurtarma kodunu döndürür. */
-    @SuppressLint("ApplySharedPref") // şifre diske yazılmadan kurtarma kodu gösterilmemeli
-    fun setPassword(pw: String): String = synchronized(lock) {
+    fun setPassword(pw: String): String {
         val salt = Password.newSalt()
         val code = Password.newRecoveryCode()
         val rSalt = Password.newSalt()
-        prefs.edit()
-            .putString(KEY_PW_SALT, Password.encode(salt))
-            .putString(KEY_PW_HASH, Password.encode(Password.hash(pw, salt)))
-            .putString(KEY_RC_SALT, Password.encode(rSalt))
-            .putString(KEY_RC_HASH, Password.encode(Password.hash(Password.normalizeRecovery(code), rSalt)))
-            .putInt(KEY_FAILS, 0)
-            .putLong(KEY_LOCKOUT, 0L)
-            .commit()
-        code
+        val sec = Security(
+            pwSalt = Password.encode(salt),
+            pwHash = Password.encode(Password.hash(pw, salt)),
+            rcSalt = Password.encode(rSalt),
+            rcHash = Password.encode(Password.hash(Password.normalizeRecovery(code), rSalt)),
+        )
+        store.withLock(SECURITY) { store.write(SECURITY, Security.serializer(), sec) }
+        DebugLog.log("Ebeveyn şifresi kaydedildi")
+        return code
     }
 
-    fun checkPassword(pw: String): PasswordCheck =
-        checkSecret(pw, KEY_PW_SALT, KEY_PW_HASH)
+    fun checkPassword(pw: String): PasswordCheck = checkSecret(pw, recovery = false)
 
-    fun checkRecovery(code: String): PasswordCheck =
-        checkSecret(Password.normalizeRecovery(code), KEY_RC_SALT, KEY_RC_HASH)
+    fun checkRecovery(code: String): PasswordCheck = checkSecret(Password.normalizeRecovery(code), recovery = true)
 
-    private fun checkSecret(secret: String, saltKey: String, hashKey: String): PasswordCheck = synchronized(lock) {
+    private fun checkSecret(secret: String, recovery: Boolean): PasswordCheck {
         val now = System.currentTimeMillis()
-        val until = prefs.getLong(KEY_LOCKOUT, 0L)
-        if (now < until) return PasswordCheck.LockedOut(until - now)
-        val salt = prefs.getString(saltKey, null)
-        val hash = prefs.getString(hashKey, null)
-        // Şifre hiç kurulmamışsa (olmaması gerekir) panele girişe izin verilir ki ebeveyn kilitli kalmasın
-        if (salt == null || hash == null) return PasswordCheck.Ok
-        val ok = try {
-            Password.verify(secret, Password.decode(salt), Password.decode(hash))
-        } catch (e: IllegalArgumentException) {
-            Log.e(TAG, "Bozuk şifre kaydı", e)
-            false
+        var result: PasswordCheck = PasswordCheck.Ok
+        store.update(SECURITY, Security.serializer(), ::Security) { s ->
+            if (now < s.lockoutUntil) {
+                result = PasswordCheck.LockedOut(s.lockoutUntil - now)
+                return@update s
+            }
+            val salt = if (recovery) s.rcSalt else s.pwSalt
+            val hash = if (recovery) s.rcHash else s.pwHash
+            // Şifre hiç kurulmamışsa (olmaması gerekir) panele girişe izin verilir ki ebeveyn kilitli kalmasın
+            if (salt == null || hash == null) {
+                result = PasswordCheck.Ok
+                return@update s
+            }
+            val ok = try {
+                Password.verify(secret, Password.decode(salt), Password.decode(hash))
+            } catch (e: IllegalArgumentException) {
+                DebugLog.error("Bozuk şifre kaydı", e)
+                false
+            }
+            if (ok) {
+                result = PasswordCheck.Ok
+                s.copy(fails = 0, lockoutUntil = 0L)
+            } else {
+                val fails = s.fails + 1
+                val lockMs = Password.lockoutMs(fails)
+                result = if (lockMs > 0) PasswordCheck.LockedOut(lockMs) else PasswordCheck.Wrong(FREE_ATTEMPTS_HINT - fails)
+                s.copy(fails = fails, lockoutUntil = if (lockMs > 0) now + lockMs else 0L)
+            }
         }
-        if (ok) {
-            prefs.edit().putInt(KEY_FAILS, 0).putLong(KEY_LOCKOUT, 0L).apply()
-            return PasswordCheck.Ok
-        }
-        val fails = prefs.getInt(KEY_FAILS, 0) + 1
-        val lockMs = Password.lockoutMs(fails)
-        prefs.edit().putInt(KEY_FAILS, fails).putLong(KEY_LOCKOUT, if (lockMs > 0) now + lockMs else 0L).apply()
-        if (lockMs > 0) PasswordCheck.LockedOut(lockMs) else PasswordCheck.Wrong(FREE_ATTEMPTS_HINT - fails)
+        return result
     }
 
     // ---------- yedek ----------
@@ -221,35 +255,38 @@ class Repository(context: Context) {
         updateProgress { p }
     }
 
-    // ---------- kalıcılık ----------
+    // ---------- eski sürümden taşıma ----------
 
-    private fun <T> load(key: String, serializer: KSerializer<T>): T? {
-        val s = prefs.getString(key, null) ?: return null
-        return try {
-            json.decodeFromString(serializer, s)
-        } catch (e: Exception) {
-            // Bozuk kayıt uygulamayı çökertmesin; yedeğini saklayıp varsayılana dön
-            Log.e(TAG, "Kayıt okunamadı: $key", e)
-            prefs.edit().putString("$key.corrupt", s).apply()
-            null
+    /** Dosya yoksa 1.0.2 ve öncesinin SharedPreferences kaydından taşır. */
+    private fun <T> loadOrMigrate(name: String, serializer: KSerializer<T>, legacyKey: String, default: () -> T): T =
+        store.update(name, serializer, {
+            val old = legacy.getString(legacyKey, null)
+            val migrated = old?.let { runCatching { json.decodeFromString(serializer, it) }.getOrNull() }
+            if (migrated != null) DebugLog.log("Eski kayıt taşındı: $legacyKey")
+            migrated ?: default()
+        }) { it }
+
+    private fun migrateSecurity() {
+        if (store.exists(SECURITY)) return
+        val hash = legacy.getString("pw_hash", null) ?: return
+        store.update(SECURITY, Security.serializer(), ::Security) { cur ->
+            if (cur.pwHash != null) cur
+            else Security(
+                pwSalt = legacy.getString("pw_salt", null),
+                pwHash = hash,
+                rcSalt = legacy.getString("rc_salt", null),
+                rcHash = legacy.getString("rc_hash", null),
+            )
         }
-    }
-
-    private fun <T> save(key: String, serializer: KSerializer<T>, value: T) {
-        prefs.edit().putString(key, json.encodeToString(serializer, value)).apply()
+        DebugLog.log("Eski şifre kaydı taşındı")
     }
 
     companion object {
-        private const val TAG = "Repository"
-        private const val KEY_PROGRESS = "progress"
-        private const val KEY_SETTINGS = "settings"
-        private const val KEY_TIME = "time"
-        private const val KEY_PW_SALT = "pw_salt"
-        private const val KEY_PW_HASH = "pw_hash"
-        private const val KEY_RC_SALT = "rc_salt"
-        private const val KEY_RC_HASH = "rc_hash"
-        private const val KEY_FAILS = "pw_fails"
-        private const val KEY_LOCKOUT = "pw_lockout"
+        private const val PROGRESS = "ilerleme.json"
+        private const val SETTINGS = "ayarlar.json"
+        private const val TIME = "sure.json"
+        private const val SECURITY = "guvenlik.json"
+        private const val STATUS = "servis.json"
         private const val FREE_ATTEMPTS_HINT = 5
 
         val json = Json {

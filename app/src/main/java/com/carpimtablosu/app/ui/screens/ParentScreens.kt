@@ -73,7 +73,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.carpimtablosu.app.data.PasswordCheck
 import com.carpimtablosu.app.data.Progress
 import com.carpimtablosu.app.DebugLog
+import com.carpimtablosu.app.App
 import com.carpimtablosu.app.lock.AppLockService
+import com.carpimtablosu.app.lock.Watchdog
 import com.carpimtablosu.app.logic.BadgeIcon
 import com.carpimtablosu.app.logic.LockPolicy
 import com.carpimtablosu.app.logic.Curriculum
@@ -228,6 +230,7 @@ private fun ParentMain(vm: AppViewModel) {
     var message by remember { mutableStateOf<String?>(null) }
     var confirmReset by remember { mutableStateOf(false) }
     val serviceOn = remember(vm.resumeTick) { SystemAccess.isAccessibilityEnabled(context) }
+    val serviceDead = remember(vm.resumeTick) { Watchdog.isDead(context) }
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(Unit) {
         while (true) {
@@ -267,13 +270,13 @@ private fun ParentMain(vm: AppViewModel) {
     }
 
     ScreenScaffold("Ebeveyn paneli", onBack = { vm.back() }) {
-        if (serviceOn && !AppLockService.connected) {
+        if (serviceDead) {
             Card {
                 Column {
                     Text("Kilit servisi çalışmıyor", style = MaterialTheme.typography.titleMedium, color = Palette.Amber)
                     Text(
-                        "Servis ayarlarda açık görünüyor ama telefon onu durdurmuş. Erişilebilirlik ayarlarından " +
-                            "kapatıp yeniden açın ve pil kısıtlamasını kaldırın. Ayrıntı: Tanılama ve kayıtlar.",
+                        "Servis ayarlarda açık görünüyor ama durmuş (ayarlarda \"hatalı çalışıyor\" yazar). " +
+                            "Erişilebilirlik ayarlarından kapatıp yeniden açın. Tekrar etmemesi için: Tanılama ve kayıtlar.",
                         color = Palette.TextDim,
                     )
                     Spacer(Modifier.height(10.dp))
@@ -613,8 +616,11 @@ private fun DiagnosticsScreen(vm: AppViewModel) {
         Spacer(Modifier.height(10.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             SmallButton("Kilit ekranını dene", Modifier.weight(1f)) {
-                val s = AppLockService.instance
-                if (s == null) info = "Servis çalışmıyor; önce erişilebilirlik servisini açın." else s.showTestLock()
+                if (Watchdog.isDead(context) || !SystemAccess.isAccessibilityEnabled(context)) {
+                    info = "Servis çalışmıyor; önce erişilebilirlik servisini kapatıp açın."
+                } else {
+                    AppLockService.requestTestLock(context)
+                }
             }
             SmallButton("Yenile", Modifier.weight(1f)) { refresh++ }
         }
@@ -632,6 +638,35 @@ private fun DiagnosticsScreen(vm: AppViewModel) {
         info?.let {
             Spacer(Modifier.height(8.dp))
             Text(it, color = Palette.Green)
+        }
+        SectionTitle("Otomatik onarım (isteğe bağlı)")
+        Card {
+            Column {
+                val canRepair = remember(vm.resumeTick, refresh) { Watchdog.canRepair(context) }
+                Text(
+                    if (canRepair) "AÇIK: servis durursa uygulama onu kendisi yeniden başlatır (15 dakikada bir ve uygulama açılınca kontrol edilir)."
+                    else "KAPALI. Android, duran bir erişilebilirlik servisini kendiliğinden başlatmaz. Bilgisayarınız varsa " +
+                        "telefonu USB hata ayıklama açık şekilde bağlayıp şu komutu bir kez çalıştırın:",
+                    color = if (canRepair) Palette.Green else Palette.TextDim,
+                )
+                if (!canRepair) {
+                    Spacer(Modifier.height(8.dp))
+                    SelectionContainer {
+                        Text(Watchdog.ADB_COMMAND, fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = Palette.Amber)
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    SmallButton("Komutu kopyala", Modifier.fillMaxWidth()) {
+                        clipboard.setText(AnnotatedString(Watchdog.ADB_COMMAND))
+                        info = "Komut kopyalandı."
+                    }
+                } else {
+                    Spacer(Modifier.height(8.dp))
+                    SmallButton("Servisi şimdi yeniden başlat", Modifier.fillMaxWidth()) {
+                        Thread { Watchdog.repair(context.applicationContext) }.start()
+                        info = "Servis yeniden başlatılıyor…"
+                    }
+                }
+            }
         }
         SectionTitle("Kayıtlar")
         Card {
@@ -651,14 +686,16 @@ private fun diagnosticsSummary(
     t: com.carpimtablosu.app.data.TimeState,
 ): String {
     val now = System.currentTimeMillis()
-    val hb = AppLockService.heartbeat
-    val beat = if (hb == 0L) "hiç" else "${(SystemClock.elapsedRealtime() - hb) / 1000} sn önce"
+    val st = App.repo(context).serviceStatus()
+    val beat = if (st.heartbeat == 0L) "hiç" else "${(now - st.heartbeat) / 1000} sn önce"
     val fmt = DateTimeFormatter.ofPattern("HH:mm")
     fun hm(m: Int) = "%02d:%02d".format(m / 60, m % 60)
     val version = runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName }.getOrNull()
     val lines = listOf(
         "Erişilebilirlik (ayar): " + if (SystemAccess.isAccessibilityEnabled(context)) "AÇIK" else "KAPALI",
-        "Servis çalışıyor: " + (if (AppLockService.connected) "EVET" else "HAYIR") + " (son sinyal: $beat)",
+        "Servis çalışıyor: " + (if (!Watchdog.isDead(context) && st.connected) "EVET" else "HAYIR") +
+            " (son sinyal: $beat, pid ${st.pid})",
+        "Otomatik onarım izni: " + if (Watchdog.canRepair(context)) "var" else "yok",
         "Kurulum tamam: " + if (s.onboarded) "evet" else "HAYIR",
         "Kilitler: " + if (s.locksEnabled) "açık" else "KAPALI",
         "Ebeveyn muafiyeti: " + if (s.parentBypassUntil > now) {
@@ -668,8 +705,8 @@ private fun diagnosticsSummary(
         "Gece modu: " + if (s.quietEnabled) "${hm(s.quietStartMin)}–${hm(s.quietEndMin)}" else "kapalı",
         "Kalan süre: ${TimeBank.format(t.bankSec)} (${t.bankSec} sn)",
         "Kilitli uygulamalar (${s.lockedApps.size}): " + s.lockedApps.sorted().joinToString(", ").ifEmpty { "YOK" },
-        "Son ön plan: " + (AppLockService.lastForeground ?: "-"),
-        "Son karar: " + (AppLockService.lastDecision ?: "-"),
+        "Son ön plan: " + (st.lastForeground ?: "-"),
+        "Son karar: " + (st.lastDecision ?: "-"),
         "Bildirim izni: " + if (SystemAccess.notificationsAllowed(context)) "var" else "YOK",
         "Pil kısıtlaması yok: " + if (SystemAccess.isIgnoringBattery(context)) "evet" else "hayır",
         "Cihaz: ${Build.MANUFACTURER} ${Build.MODEL}, Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}), uygulama $version",
@@ -776,6 +813,14 @@ fun PermissionList(vm: AppViewModel) {
                 "Bazı telefonlar (Xiaomi, Huawei, Oppo) arka plandaki servisi kapatabilir. Listeden uygulamayı \"Kısıtlama yok\" yapın.",
                 battery,
             ) { safeStart(context, SystemAccess.batterySettings()) }
+            if (SystemAccess.isXiaomi()) {
+                PermissionRow(
+                    "Otomatik başlatma (Xiaomi)",
+                    "Xiaomi/Redmi/POCO telefonlar servisi durdurabilir. Açılan listede Çarpım Tablosu'nu açın. " +
+                        "Ayrıca Son uygulamalar ekranında uygulamaya basılı tutup kilit simgesine dokunun.",
+                    false,
+                ) { safeStart(context, SystemAccess.xiaomiAutostart()) }
+            }
             PermissionRow("Mikrofon (isteğe bağlı)", "Sesli cevap için.", mic) {
                 micLauncher.launch(Manifest.permission.RECORD_AUDIO)
             }

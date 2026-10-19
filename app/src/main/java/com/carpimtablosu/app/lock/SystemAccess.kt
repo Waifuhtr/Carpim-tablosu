@@ -88,6 +88,12 @@ object SystemAccess {
     fun notificationsAllowed(context: Context): Boolean =
         context.getSystemService(android.app.NotificationManager::class.java).areNotificationsEnabled()
 
+    fun isXiaomi(): Boolean = Build.MANUFACTURER.lowercase() in setOf("xiaomi", "redmi", "poco")
+
+    fun xiaomiAutostart(): Intent = Intent().setComponent(
+        ComponentName("com.miui.securitycenter", "com.miui.permcenter.autostart.AutoStartManagementActivity")
+    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+
     fun needsRestrictedSettingsHint(): Boolean = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
 
     /** Ana ekranda simgesi olan, kilitlenebilir uygulamalar. */

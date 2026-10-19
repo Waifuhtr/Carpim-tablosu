@@ -21,6 +21,7 @@ import com.carpimtablosu.app.App
 import com.carpimtablosu.app.DebugLog
 import com.carpimtablosu.app.R
 import com.carpimtablosu.app.data.Repository
+import com.carpimtablosu.app.data.ServiceStatus
 import com.carpimtablosu.app.logic.LockPolicy
 import com.carpimtablosu.app.logic.LockReason
 import com.carpimtablosu.app.logic.TimeBank
@@ -33,6 +34,9 @@ import com.carpimtablosu.app.ui.MainActivity
  * Ön plandaki uygulama iki yoldan öğrenilir: pencere değişim olayları ve her saniye
  * yapılan yoklama (bazı telefonlar olayları geciktirir veya hiç göndermez).
  * Süre ölçümü SystemClock.elapsedRealtime ile yapılır; saati değiştirmek süreyi etkilemez.
+ *
+ * Servis ayrı bir süreçte (":kilit") çalışır; uygulama ekranı kapansa veya hata verse
+ * bile etkilenmez. Durumunu diske yazar, ekran tarafı tanılama için oradan okur.
  */
 class AppLockService : AccessibilityService() {
 
@@ -54,13 +58,22 @@ class AppLockService : AccessibilityService() {
     private var lastBlock = 0L
     private var lastProtectCheck = 0L
     private var lastLoggedDecision = ""
+    private var lastDecision: String? = null
+    private var lastStatusWrite = 0L
     private var ignored: Set<String> = emptySet()
+
+    private val testReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            DebugLog.log("Deneme kilidi istendi")
+            overlay.show(LockMode.NO_TIME, "")
+        }
+    }
 
     private val screenReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             if (intent.action == Intent.ACTION_SCREEN_OFF) {
                 // Ekran kapanırken birikmiş süreyi işle; kapalıyken süre saymaz
-                accountTime()
+                accountTime(force = true)
                 flushSpent()
             } else {
                 lastTick = SystemClock.elapsedRealtime()
@@ -86,8 +99,7 @@ class AppLockService : AccessibilityService() {
         notifications = getSystemService(NotificationManager::class.java)
         overlay = LockOverlay(this, onHome = { goHome() }, onEarn = { openTraining() }, onEmergency = { openDialer() })
         ignored = buildIgnoredSet()
-        instance = this
-        connected = true
+        repo.refresh()
         val s = repo.settings.value
         DebugLog.log(
             "Servis bağlandı. kurulum=${s.onboarded} kilitler=${s.locksEnabled} " +
@@ -103,6 +115,10 @@ class AppLockService : AccessibilityService() {
             },
             ContextCompat.RECEIVER_NOT_EXPORTED,
         )
+        ContextCompat.registerReceiver(
+            this, testReceiver, IntentFilter(ACTION_TEST_LOCK), ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
+        writeStatus(connected = true)
         handler.removeCallbacks(tick)
         handler.post(tick)
     }
@@ -128,7 +144,13 @@ class AppLockService : AccessibilityService() {
 
     override fun onUnbind(intent: Intent?): Boolean {
         DebugLog.log("Servis bağlantısı kesildi (ayarlardan kapatılmış olabilir)")
+        if (::repo.isInitialized) writeStatus(connected = false)
         return super.onUnbind(intent)
+    }
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (level >= TRIM_MEMORY_RUNNING_LOW) DebugLog.log("Bellek azalıyor (seviye $level)")
     }
 
     override fun onDestroy() {
@@ -137,9 +159,9 @@ class AppLockService : AccessibilityService() {
             endSession()
             overlay.hide()
             runCatching { unregisterReceiver(screenReceiver) }
+            runCatching { unregisterReceiver(testReceiver) }
+            writeStatus(connected = false)
         }
-        if (instance === this) instance = null
-        connected = false
         DebugLog.log("Servis durdu")
         super.onDestroy()
     }
@@ -158,7 +180,6 @@ class AppLockService : AccessibilityService() {
         if (pkg in ignored) return
         if (pkg != foregroundPkg) DebugLog.log("Ön plan ($source): $pkg")
         foregroundPkg = pkg
-        lastForeground = pkg
         when {
             pkg == packageName -> endSession()
             pkg in SystemAccess.PROTECTED_PACKAGES -> {
@@ -170,6 +191,8 @@ class AppLockService : AccessibilityService() {
     }
 
     private fun evaluate(pkg: String) {
+        // Ayarlar ve süre ekran sürecinde değişmiş olabilir: diskteki son hali kullan
+        repo.refresh()
         val settings = repo.settings.value
         val now = System.currentTimeMillis()
         val bank = repo.time.value.bankSec
@@ -182,7 +205,10 @@ class AppLockService : AccessibilityService() {
                 lastLoggedDecision = d
             }
         }
-        lastDecision = "$pkg → $reason"
+        if (lastDecision != "$pkg → $reason") {
+            lastDecision = "$pkg → $reason"
+            writeStatus(connected = true)
+        }
         if (reason != LockReason.NONE) {
             endSession()
             block(LockMode.of(reason), pkg)
@@ -206,21 +232,25 @@ class AppLockService : AccessibilityService() {
 
     private fun endSession() {
         val pkg = sessionPkg ?: return
-        accountTime()
+        accountTime(force = true)
         flushSpent()
         sessionPkg = null
         notifications.cancel(NOTIF_REMAINING)
         DebugLog.log("Süre durdu: $pkg (kalan ${repo.time.value.bankSec}sn)")
     }
 
-    /** Son ölçümden bu yana geçen süreyi bankadan düşer. */
-    private fun accountTime() {
+    /**
+     * Son ölçümden bu yana geçen süreyi bankadan düşer. Diske her saniye yazmamak için
+     * birkaç saniye biriktirilir; [force] ile hemen işlenir.
+     */
+    private fun accountTime(force: Boolean = false) {
         val now = SystemClock.elapsedRealtime()
         val delta = (now - lastTick).coerceAtLeast(0L)
         lastTick = now
-        if (sessionPkg == null || !power.isInteractive) return
-        // Uzun bir boşluk (ör. cihaz uykudaydı) tek seferde düşülmez
-        pendingMs += delta.coerceAtMost(MAX_GAP_MS)
+        if (sessionPkg == null) return
+        // Ekran kapalıyken süre saymaz; uzun bir boşluk (ör. cihaz uykudaydı) tek seferde düşülmez
+        if (power.isInteractive) pendingMs += delta.coerceAtMost(MAX_GAP_MS)
+        if (!force && pendingMs < SPEND_BATCH_MS) return
         val sec = pendingMs / 1000
         if (sec > 0) {
             pendingMs -= sec * 1000
@@ -237,12 +267,16 @@ class AppLockService : AccessibilityService() {
     }
 
     private fun onTick() {
-        heartbeat = SystemClock.elapsedRealtime()
+        val nowRt = SystemClock.elapsedRealtime()
+        // Canlılık sinyali: ekran açıkken sık, kapalıyken seyrek yazılır
+        val statusEvery = if (power.isInteractive) STATUS_EVERY_MS else STATUS_EVERY_MS * 6
+        if (nowRt - lastStatusWrite > statusEvery) writeStatus(connected = true)
         pollForeground()
         val pkg = sessionPkg ?: return
         accountTime()
-        if (SystemClock.elapsedRealtime() - lastFlush > FLUSH_MS) flushSpent()
+        if (nowRt - lastFlush > FLUSH_MS) flushSpent()
 
+        repo.refresh()
         val settings = repo.settings.value
         val now = System.currentTimeMillis()
         if (pkg !in settings.lockedApps || !LockPolicy.locksActive(settings, now)) {
@@ -327,10 +361,17 @@ class AppLockService : AccessibilityService() {
 
     internal val isLockShowing: Boolean get() = overlay.isShowing
 
-    /** Tanılama ekranındaki "Kilit ekranını dene" düğmesi için. */
-    fun showTestLock() {
-        DebugLog.log("Deneme kilidi istendi")
-        overlay.show(LockMode.NO_TIME, "")
+    private fun writeStatus(connected: Boolean) {
+        lastStatusWrite = SystemClock.elapsedRealtime()
+        repo.writeServiceStatus(
+            ServiceStatus(
+                connected = connected,
+                heartbeat = System.currentTimeMillis(),
+                lastForeground = foregroundPkg,
+                lastDecision = lastDecision,
+                pid = android.os.Process.myPid(),
+            )
+        )
     }
 
     // ------------------------- bildirimler -------------------------
@@ -375,19 +416,16 @@ class AppLockService : AccessibilityService() {
         private const val WARN_AT_SEC = 60L
         private const val BLOCK_DEBOUNCE_MS = 800L
         private const val PROTECT_THROTTLE_MS = 500L
+        private const val SPEND_BATCH_MS = 5_000L
+        private const val STATUS_EVERY_MS = 10_000L
         private const val NOTIF_REMAINING = 1
         private const val NOTIF_WARN = 2
 
-        // Tanılama ekranı için (aynı süreçte okunur)
-        @Volatile var instance: AppLockService? = null
-            private set
-        @Volatile var connected = false
-            private set
-        @Volatile var heartbeat = 0L
-            private set
-        @Volatile var lastForeground: String? = null
-            private set
-        @Volatile var lastDecision: String? = null
-            private set
+        /** Ekran sürecinden "kilit ekranını dene" isteği. */
+        const val ACTION_TEST_LOCK = "com.carpimtablosu.app.TEST_LOCK"
+
+        fun requestTestLock(context: Context) {
+            context.sendBroadcast(Intent(ACTION_TEST_LOCK).setPackage(context.packageName))
+        }
     }
 }
