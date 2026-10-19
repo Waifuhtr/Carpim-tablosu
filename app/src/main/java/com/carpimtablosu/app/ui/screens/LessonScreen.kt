@@ -198,7 +198,7 @@ private fun LessonTopBar(lesson: LessonState, bankSec: Long, sprint: Boolean, on
             ProgressBar(lesson.progress, Palette.Green, Modifier.weight(1f))
         }
         Spacer(Modifier.width(12.dp))
-        StatChip(BadgeIcon.TIMER, "${bankSec / 60} dk", if (bankSec > 0) Palette.Green else Palette.TextDim)
+        StatChip(BadgeIcon.TIMER, bankLabel(bankSec), if (bankSec > 0) Palette.Green else Palette.TextDim)
     }
 }
 
@@ -467,6 +467,9 @@ private fun FeedbackArea(lesson: LessonState, q: Question, onNext: () -> Unit, s
         }
     }
 }
+
+/** Üst çubuktaki kalan süre: 1 dakikanın altında saniye gösterilir ki "0 dk" yanıltmasın. */
+fun bankLabel(sec: Long): String = if (sec >= 60) "${sec / 60} dk" else "$sec sn"
 
 fun formatDelta(sec: Long): String =
     if (sec % 60 == 0L) "${sec / 60} dk" else if (sec < 60) "$sec sn" else "${sec / 60} dk ${sec % 60} sn"

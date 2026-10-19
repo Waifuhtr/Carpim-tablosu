@@ -86,7 +86,7 @@ fun HomeScreen(vm: AppViewModel) {
         TopBar(
             streak = ProgressOps.displayStreak(progress, today),
             xp = progress.xp,
-            minutes = time.bankSec / 60,
+            bankSec = time.bankSec,
             onParent = { vm.push(Screen.ParentGate) },
         )
         Box(Modifier.weight(1f)) {
@@ -102,7 +102,7 @@ fun HomeScreen(vm: AppViewModel) {
 }
 
 @Composable
-private fun TopBar(streak: Int, xp: Int, minutes: Long, onParent: () -> Unit) {
+private fun TopBar(streak: Int, xp: Int, bankSec: Long, onParent: () -> Unit) {
     Row(
         Modifier
             .fillMaxWidth()
@@ -113,7 +113,7 @@ private fun TopBar(streak: Int, xp: Int, minutes: Long, onParent: () -> Unit) {
         Spacer(Modifier.width(18.dp))
         StatChip(BadgeIcon.STAR, "$xp", Palette.Amber)
         Spacer(Modifier.width(18.dp))
-        StatChip(BadgeIcon.TIMER, "$minutes dk", if (minutes > 0) Palette.Green else Palette.TextDim)
+        StatChip(BadgeIcon.TIMER, bankLabel(bankSec), if (bankSec > 0) Palette.Green else Palette.TextDim)
         Spacer(Modifier.weight(1f))
         Box(
             Modifier

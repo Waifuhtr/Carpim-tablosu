@@ -8,14 +8,17 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
 import android.view.accessibility.AccessibilityEvent
 import android.view.inputmethod.InputMethodManager
+import android.widget.Toast
 import androidx.core.content.ContextCompat
 import com.carpimtablosu.app.App
+import com.carpimtablosu.app.DebugLog
 import com.carpimtablosu.app.R
 import com.carpimtablosu.app.data.Repository
 import com.carpimtablosu.app.logic.LockPolicy
@@ -27,8 +30,9 @@ import com.carpimtablosu.app.ui.MainActivity
  * Ön plandaki uygulamayı izler. Seçili bir uygulama açıkken süre bankasından düşer,
  * süre bitince (veya gece modunda) kilit ekranını gösterir.
  *
- * Süre ölçümü SystemClock.elapsedRealtime ile yapılır; telefonun saatini değiştirmek
- * süreyi etkilemez. Ekran kapalıyken süre düşmez.
+ * Ön plandaki uygulama iki yoldan öğrenilir: pencere değişim olayları ve her saniye
+ * yapılan yoklama (bazı telefonlar olayları geciktirir veya hiç göndermez).
+ * Süre ölçümü SystemClock.elapsedRealtime ile yapılır; saati değiştirmek süreyi etkilemez.
  */
 class AppLockService : AccessibilityService() {
 
@@ -36,6 +40,7 @@ class AppLockService : AccessibilityService() {
     private lateinit var repo: Repository
     private lateinit var power: PowerManager
     private lateinit var notifications: NotificationManager
+    private lateinit var overlay: LockOverlay
 
     /** Kullanıcının şu an gördüğü uygulama (klavye ve bildirim paneli hariç). */
     private var foregroundPkg: String? = null
@@ -48,6 +53,7 @@ class AppLockService : AccessibilityService() {
     private var warned = false
     private var lastBlock = 0L
     private var lastProtectCheck = 0L
+    private var lastLoggedDecision = ""
     private var ignored: Set<String> = emptySet()
 
     private val screenReceiver = object : BroadcastReceiver() {
@@ -64,7 +70,11 @@ class AppLockService : AccessibilityService() {
 
     private val tick = object : Runnable {
         override fun run() {
-            onTick()
+            try {
+                onTick()
+            } catch (e: RuntimeException) {
+                DebugLog.error("Zamanlayıcı hatası", e)
+            }
             handler.postDelayed(this, TICK_MS)
         }
     }
@@ -74,7 +84,15 @@ class AppLockService : AccessibilityService() {
         repo = App.repo(this)
         power = getSystemService(PowerManager::class.java)
         notifications = getSystemService(NotificationManager::class.java)
+        overlay = LockOverlay(this, onHome = { goHome() }, onEarn = { openTraining() }, onEmergency = { openDialer() })
         ignored = buildIgnoredSet()
+        instance = this
+        connected = true
+        val s = repo.settings.value
+        DebugLog.log(
+            "Servis bağlandı. kurulum=${s.onboarded} kilitler=${s.locksEnabled} " +
+                "kilitliUygulama=${s.lockedApps.size} süre=${repo.time.value.bankSec}sn yoksay=$ignored"
+        )
         // Not: burada koruma muafiyeti verilmez; aksi halde telefonu yeniden başlatmak
         // korumayı birkaç dakika kapatırdı. Ebeveyn servisi panelden açarken panel zaten muafiyet verir.
         ContextCompat.registerReceiver(
@@ -93,23 +111,36 @@ class AppLockService : AccessibilityService() {
         if (!::repo.isInitialized) return
         val pkg = event?.packageName?.toString() ?: return
         val type = event.eventType
-        if (type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
-            onWindowChanged(pkg)
-        } else if (type == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED &&
-            pkg == foregroundPkg && pkg in SystemAccess.PROTECTED_PACKAGES
-        ) {
-            checkProtection(throttle = true)
+        try {
+            if (type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+                onWindowChanged(pkg, "olay")
+            } else if (type == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED &&
+                pkg == foregroundPkg && pkg in SystemAccess.PROTECTED_PACKAGES
+            ) {
+                checkProtection(throttle = true)
+            }
+        } catch (e: RuntimeException) {
+            DebugLog.error("Olay işlenemedi ($pkg)", e)
         }
     }
 
     override fun onInterrupt() = Unit
 
+    override fun onUnbind(intent: Intent?): Boolean {
+        DebugLog.log("Servis bağlantısı kesildi (ayarlardan kapatılmış olabilir)")
+        return super.onUnbind(intent)
+    }
+
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
         if (::repo.isInitialized) {
             endSession()
+            overlay.hide()
             runCatching { unregisterReceiver(screenReceiver) }
         }
+        if (instance === this) instance = null
+        connected = false
+        DebugLog.log("Servis durdu")
         super.onDestroy()
     }
 
@@ -122,10 +153,12 @@ class AppLockService : AccessibilityService() {
         return (imes + "com.android.systemui").toSet()
     }
 
-    private fun onWindowChanged(pkg: String) {
+    private fun onWindowChanged(pkg: String, source: String) {
         // Klavye ve bildirim paneli ön plandaki uygulamayı değiştirmez
         if (pkg in ignored) return
+        if (pkg != foregroundPkg) DebugLog.log("Ön plan ($source): $pkg")
         foregroundPkg = pkg
+        lastForeground = pkg
         when {
             pkg == packageName -> endSession()
             pkg in SystemAccess.PROTECTED_PACKAGES -> {
@@ -139,10 +172,20 @@ class AppLockService : AccessibilityService() {
     private fun evaluate(pkg: String) {
         val settings = repo.settings.value
         val now = System.currentTimeMillis()
+        val bank = repo.time.value.bankSec
         val reason = LockPolicy.decide(settings, repo.time.value, pkg, now, repo.minuteOfDay())
+        if (pkg in settings.lockedApps) {
+            val d = "Karar $pkg: $reason (süre=${bank}sn, kurulum=${settings.onboarded}, " +
+                "kilitler=${settings.locksEnabled}, ebeveynMuafiyeti=${settings.parentBypassUntil > now})"
+            if (d != lastLoggedDecision) {
+                DebugLog.log(d)
+                lastLoggedDecision = d
+            }
+        }
+        lastDecision = "$pkg → $reason"
         if (reason != LockReason.NONE) {
             endSession()
-            block(LockActivity.modeFor(reason), pkg)
+            block(LockMode.of(reason), pkg)
             return
         }
         val tracked = pkg in settings.lockedApps && LockPolicy.locksActive(settings, now)
@@ -157,15 +200,17 @@ class AppLockService : AccessibilityService() {
         lastFlush = lastTick
         pendingMs = 0L
         warned = repo.time.value.bankSec <= WARN_AT_SEC
+        DebugLog.log("Süre işliyor: $pkg (kalan ${repo.time.value.bankSec}sn)")
         showRemaining()
     }
 
     private fun endSession() {
-        if (sessionPkg == null) return
+        val pkg = sessionPkg ?: return
         accountTime()
         flushSpent()
         sessionPkg = null
         notifications.cancel(NOTIF_REMAINING)
+        DebugLog.log("Süre durdu: $pkg (kalan ${repo.time.value.bankSec}sn)")
     }
 
     /** Son ölçümden bu yana geçen süreyi bankadan düşer. */
@@ -192,6 +237,8 @@ class AppLockService : AccessibilityService() {
     }
 
     private fun onTick() {
+        heartbeat = SystemClock.elapsedRealtime()
+        pollForeground()
         val pkg = sessionPkg ?: return
         accountTime()
         if (SystemClock.elapsedRealtime() - lastFlush > FLUSH_MS) flushSpent()
@@ -204,8 +251,9 @@ class AppLockService : AccessibilityService() {
         }
         val reason = LockPolicy.decide(settings, repo.time.value, pkg, now, repo.minuteOfDay())
         if (reason != LockReason.NONE) {
+            DebugLog.log("Süre bitti / kilit zamanı: $pkg → $reason")
             endSession()
-            block(LockActivity.modeFor(reason), pkg)
+            block(LockMode.of(reason), pkg)
             return
         }
         val left = repo.time.value.bankSec
@@ -216,12 +264,28 @@ class AppLockService : AccessibilityService() {
         showRemaining()
     }
 
-    private fun block(mode: LockActivity.Mode, pkg: String) {
+    /** Olaylar gelmese bile ön plandaki uygulamayı yakalamak için etkin pencereye bakar. */
+    private fun pollForeground() {
+        if (overlay.isShowing || !power.isInteractive) return
+        val root = runCatching { rootInActiveWindow }.getOrNull() ?: return
+        val pkg = root.packageName?.toString()
+        @Suppress("DEPRECATION")
+        runCatching { root.recycle() }
+        if (pkg != null && pkg != foregroundPkg) onWindowChanged(pkg, "yoklama")
+    }
+
+    private fun block(mode: LockMode, pkg: String) {
         val now = SystemClock.elapsedRealtime()
-        if (now - lastBlock < BLOCK_DEBOUNCE_MS) return
+        if (now - lastBlock < BLOCK_DEBOUNCE_MS && overlay.isShowing) return
         lastBlock = now
-        performGlobalAction(GLOBAL_ACTION_HOME)
-        startActivity(LockActivity.intent(this, mode, pkg))
+        DebugLog.log("KİLİT: $pkg ($mode)")
+        val home = performGlobalAction(GLOBAL_ACTION_HOME)
+        if (!home) DebugLog.log("Ana ekrana dönülemedi")
+        overlay.show(mode, pkg)
+        if (!overlay.isShowing) {
+            // Katman eklenemediyse en azından uyarı ver
+            Toast.makeText(this, "Süren bitti! Soru çözerek süre kazan.", Toast.LENGTH_LONG).show()
+        }
     }
 
     private fun checkProtection(throttle: Boolean) {
@@ -232,7 +296,41 @@ class AppLockService : AccessibilityService() {
         val root = rootInActiveWindow ?: return
         val label = getString(R.string.app_name)
         val hit = runCatching { root.findAccessibilityNodeInfosByText(label).isNotEmpty() }.getOrDefault(false)
-        if (hit) block(LockActivity.Mode.PROTECT, root.packageName?.toString() ?: "")
+        if (hit) {
+            DebugLog.log("Korunan ayar ekranı: ${root.packageName}")
+            block(LockMode.PROTECT, root.packageName?.toString() ?: "")
+        }
+    }
+
+    private fun goHome() {
+        performGlobalAction(GLOBAL_ACTION_HOME)
+    }
+
+    private fun openTraining() {
+        try {
+            startActivity(
+                Intent(this, MainActivity::class.java)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            )
+            DebugLog.log("Eğitim ekranı açıldı")
+        } catch (e: RuntimeException) {
+            DebugLog.error("Eğitim ekranı açılamadı", e)
+            Toast.makeText(this, "Çarpım Tablosu uygulamasını açarak soru çözebilirsin.", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun openDialer() {
+        runCatching {
+            startActivity(Intent(Intent.ACTION_DIAL, Uri.parse("tel:112")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        }.onFailure { DebugLog.error("Arama ekranı açılamadı", it) }
+    }
+
+    internal val isLockShowing: Boolean get() = overlay.isShowing
+
+    /** Tanılama ekranındaki "Kilit ekranını dene" düğmesi için. */
+    fun showTestLock() {
+        DebugLog.log("Deneme kilidi istendi")
+        overlay.show(LockMode.NO_TIME, "")
     }
 
     // ------------------------- bildirimler -------------------------
@@ -257,6 +355,8 @@ class AppLockService : AccessibilityService() {
     }
 
     private fun warnOneMinute() {
+        DebugLog.log("1 dakika uyarısı")
+        Toast.makeText(this, "1 dakika kaldı!", Toast.LENGTH_LONG).show()
         if (!notifications.areNotificationsEnabled()) return
         val n = Notification.Builder(this, App.CHANNEL_ALERTS)
             .setSmallIcon(R.drawable.ic_timer)
@@ -277,5 +377,17 @@ class AppLockService : AccessibilityService() {
         private const val PROTECT_THROTTLE_MS = 500L
         private const val NOTIF_REMAINING = 1
         private const val NOTIF_WARN = 2
+
+        // Tanılama ekranı için (aynı süreçte okunur)
+        @Volatile var instance: AppLockService? = null
+            private set
+        @Volatile var connected = false
+            private set
+        @Volatile var heartbeat = 0L
+            private set
+        @Volatile var lastForeground: String? = null
+            private set
+        @Volatile var lastDecision: String? = null
+            private set
     }
 }

@@ -3,6 +3,7 @@ package com.carpimtablosu.app.data
 import android.annotation.SuppressLint
 import android.content.Context
 import android.util.Log
+import com.carpimtablosu.app.DebugLog
 import com.carpimtablosu.app.logic.Achievement
 import com.carpimtablosu.app.logic.Achievements
 import com.carpimtablosu.app.logic.LessonState
@@ -54,11 +55,24 @@ class Repository(context: Context) {
     }
 
     fun updateSettings(f: (Settings) -> Settings) = synchronized(lock) {
-        val n = f(_settings.value)
-        if (n != _settings.value) {
+        val old = _settings.value
+        val n = f(old)
+        if (n != old) {
+            logSettingsChange(old, n)
             _settings.value = n
             save(KEY_SETTINGS, Settings.serializer(), n)
         }
+    }
+
+    private fun logSettingsChange(old: Settings, n: Settings) {
+        val parts = mutableListOf<String>()
+        if (old.onboarded != n.onboarded) parts += "kurulum=${n.onboarded}"
+        if (old.locksEnabled != n.locksEnabled) parts += "kilitler=${n.locksEnabled}"
+        if (old.lockedApps != n.lockedApps) parts += "kilitliUygulamalar=${n.lockedApps.sorted()}"
+        if (old.parentBypassUntil != n.parentBypassUntil) parts += "ebeveynMuafiyetiBitiş=${n.parentBypassUntil}"
+        if (old.quietEnabled != n.quietEnabled) parts += "geceModu=${n.quietEnabled}"
+        if (old.protectSettings != n.protectSettings) parts += "ayarKoruması=${n.protectSettings}"
+        if (parts.isNotEmpty()) DebugLog.log("Ayar değişti: " + parts.joinToString(", "))
     }
 
     private fun updateTime(f: (TimeState) -> TimeState) = synchronized(lock) {
@@ -93,6 +107,7 @@ class Repository(context: Context) {
             }
         }
         if (delta != 0L) updateProgress { ProgressOps.recordTime(it, today, earnedSec = delta) }
+        DebugLog.log("Cevap ${if (correct) "doğru" else "yanlış"} ($factKey): süre ${if (delta >= 0) "+" else ""}${delta}sn → ${_time.value.bankSec}sn")
         AnswerOutcome(delta, capReached)
     }
 
@@ -131,9 +146,15 @@ class Repository(context: Context) {
         if (sec > 0L) updateProgress { ProgressOps.recordTime(it, today(), spentSec = sec) }
     }
 
-    fun adjustTime(deltaSec: Long) = updateTime { TimeBank.adjust(it, deltaSec) }
+    fun adjustTime(deltaSec: Long) {
+        updateTime { TimeBank.adjust(it, deltaSec) }
+        DebugLog.log("Ebeveyn süreyi değiştirdi: ${deltaSec}sn → ${_time.value.bankSec}sn")
+    }
 
-    fun clearTime() = updateTime { it.copy(bankSec = 0L) }
+    fun clearTime() {
+        updateTime { it.copy(bankSec = 0L) }
+        DebugLog.log("Ebeveyn süreyi sıfırladı")
+    }
 
     // ---------- ebeveyn şifresi ----------
 

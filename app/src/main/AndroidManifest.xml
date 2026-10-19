@@ -44,15 +44,6 @@
             </intent-filter>
         </activity>
 
-        <activity
-            android:name=".lock.LockActivity"
-            android:excludeFromRecents="true"
-            android:exported="false"
-            android:launchMode="singleTask"
-            android:screenOrientation="portrait"
-            tools:ignore="DiscouragedApi,LockedOrientationActivity"
-            android:taskAffinity="com.carpimtablosu.app.lock"
-            android:windowSoftInputMode="adjustResize" />
 
         <service
             android:name=".lock.AppLockService"

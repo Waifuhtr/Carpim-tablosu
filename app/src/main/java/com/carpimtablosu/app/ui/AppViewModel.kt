@@ -29,7 +29,7 @@ sealed interface Screen {
     data class Parent(val section: ParentSection) : Screen
 }
 
-enum class ParentSection { MAIN, APPS, RULES, REPORT, SECURITY }
+enum class ParentSection { MAIN, APPS, RULES, REPORT, SECURITY, DIAGNOSTICS }
 
 enum class HomeTab { PATH, PRACTICE, BADGES, PROFILE }
 

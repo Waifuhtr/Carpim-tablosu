@@ -60,6 +60,8 @@ Ebeveyn panelinden bu değerler, günlük kazanma sınırı (varsayılan 60 dk) 
 5. Kilitlenecek uygulamaları seçin (YouTube, oyunlar vb.).
 6. İsterseniz Ebeveyn paneli → Güvenlik ve izinler → **Kaldırma korumasını aç**.
 
+**Kilit çalışmıyorsa:** Ebeveyn paneli → **Tanılama ve kayıtlar**. Bu ekran servisin çalışıp çalışmadığını, kilitli uygulamaları ve kalan süreyi gösterir. "Kilit ekranını dene" ile kilit ekranını test edebilir, "Kayıtları kopyala" ile ayrıntılı kaydı kopyalayıp geliştiriciye gönderebilirsiniz.
+
 ## Bilinen sınırlar
 
 - Kilit, Android'in erişilebilirlik servisiyle çalışır. Telefonu güvenli modda başlatmak üçüncü taraf servisleri kapatır. Bu, hiçbir normal uygulamanın engelleyemeyeceği bir Android davranışıdır.

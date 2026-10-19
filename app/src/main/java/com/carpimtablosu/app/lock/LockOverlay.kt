@@ -1,12 +1,10 @@
 package com.carpimtablosu.app.lock
 
 import android.content.Context
-import android.content.Intent
-import android.net.Uri
-import android.os.Bundle
-import androidx.activity.ComponentActivity
-import androidx.activity.OnBackPressedCallback
-import androidx.activity.compose.setContent
+import android.graphics.PixelFormat
+import android.view.KeyEvent
+import android.view.WindowManager
+import android.widget.FrameLayout
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -29,13 +27,23 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.ComposeView
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.LifecycleRegistry
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.setViewTreeLifecycleOwner
+import androidx.savedstate.SavedStateRegistry
+import androidx.savedstate.SavedStateRegistryController
+import androidx.savedstate.SavedStateRegistryOwner
+import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import com.carpimtablosu.app.App
+import com.carpimtablosu.app.DebugLog
 import com.carpimtablosu.app.data.PasswordCheck
 import com.carpimtablosu.app.logic.LockReason
-import com.carpimtablosu.app.ui.MainActivity
 import com.carpimtablosu.app.ui.components.BigButton
 import com.carpimtablosu.app.ui.components.ButtonStyle
 import com.carpimtablosu.app.ui.components.Mascot
@@ -50,113 +58,142 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-/**
- * Kilitli uygulamanın yerine açılan tam ekran. Geri tuşu ana ekrana götürür;
- * kilitli uygulamaya geri dönmenin tek yolu süre kazanmak veya ebeveyn şifresidir.
- */
-class LockActivity : ComponentActivity() {
-
-    enum class Mode { NO_TIME, QUIET, PROTECT }
-
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
-            override fun handleOnBackPressed() = goHome()
-        })
-        render()
-    }
-
-    override fun onNewIntent(intent: Intent) {
-        super.onNewIntent(intent)
-        setIntent(intent)
-        render()
-    }
-
-    override fun onStop() {
-        super.onStop()
-        // Arka planda eski bir kilit ekranı kalmasın
-        if (!isChangingConfigurations) finish()
-    }
-
-    private fun render() {
-        val mode = runCatching { Mode.valueOf(intent.getStringExtra(EXTRA_MODE) ?: "") }.getOrDefault(Mode.NO_TIME)
-        val pkg = intent.getStringExtra(EXTRA_PKG).orEmpty()
-        val label = if (pkg.isEmpty()) "" else SystemAccess.appLabel(this, pkg)
-        setContent {
-            CarpimTheme {
-                LockContent(
-                    mode = mode,
-                    appLabel = label,
-                    onEarn = { openTraining() },
-                    onHome = { goHome() },
-                    onEmergency = { openDialer() },
-                    onUnlocked = { finish() },
-                )
-            }
-        }
-    }
-
-    private fun openTraining() {
-        startActivity(
-            Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-        )
-        finish()
-    }
-
-    private fun goHome() {
-        startActivity(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-        finish()
-    }
-
-    private fun openDialer() {
-        runCatching { startActivity(Intent(Intent.ACTION_DIAL, Uri.parse("tel:112")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
-        finish()
-    }
+enum class LockMode {
+    NO_TIME, QUIET, PROTECT;
 
     companion object {
-        private const val EXTRA_MODE = "mode"
-        private const val EXTRA_PKG = "pkg"
+        fun of(reason: LockReason): LockMode = if (reason == LockReason.QUIET_HOURS) QUIET else NO_TIME
+    }
+}
 
-        fun modeFor(reason: LockReason): Mode = when (reason) {
-            LockReason.QUIET_HOURS -> Mode.QUIET
-            else -> Mode.NO_TIME
+/**
+ * Kilit ekranı, erişilebilirlik servisinin kendi penceresi olarak çizilir
+ * (TYPE_ACCESSIBILITY_OVERLAY). Bu pencere ayrı bir izin istemez ve bazı
+ * üreticilerin (ör. Xiaomi) "arka plandan ekran açma" engeline takılmaz;
+ * önceki sürümdeki Activity tabanlı kilit ekranı bu yüzden bazı telefonlarda hiç görünmüyordu.
+ */
+class LockOverlay(
+    private val context: Context,
+    private val onHome: () -> Unit,
+    private val onEarn: () -> Unit,
+    private val onEmergency: () -> Unit,
+) {
+    private val wm = context.getSystemService(WindowManager::class.java)
+    private var root: FrameLayout? = null
+    private var owner: OverlayOwner? = null
+    private val state = mutableStateOf(LockMode.NO_TIME to "")
+
+    val isShowing: Boolean get() = root != null
+
+    fun show(mode: LockMode, pkg: String) {
+        state.value = mode to (if (pkg.isEmpty()) "" else SystemAccess.appLabel(context, pkg))
+        if (root != null) return
+        val o = OverlayOwner().also { it.start() }
+        val compose = ComposeView(context).apply {
+            setViewTreeLifecycleOwner(o)
+            setViewTreeSavedStateRegistryOwner(o)
+            setContent {
+                val (m, label) = state.value
+                CarpimTheme {
+                    LockContent(
+                        mode = m,
+                        appLabel = label,
+                        onEarn = { hide(); onEarn() },
+                        onHome = { hide(); onHome() },
+                        onEmergency = { hide(); onEmergency() },
+                        onUnlocked = { hide() },
+                    )
+                }
+            }
         }
+        // Geri tuşu ana ekrana götürür; kilitli uygulamaya dönülmez
+        val frame = object : FrameLayout(context) {
+            override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+                if (event.keyCode == KeyEvent.KEYCODE_BACK) {
+                    if (event.action == KeyEvent.ACTION_UP) {
+                        hide()
+                        onHome()
+                    }
+                    return true
+                }
+                return super.dispatchKeyEvent(event)
+            }
+        }
+        frame.setViewTreeLifecycleOwner(o)
+        frame.setViewTreeSavedStateRegistryOwner(o)
+        frame.addView(compose)
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.OPAQUE,
+        ).apply {
+            softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+        }
+        try {
+            wm.addView(frame, params)
+            root = frame
+            owner = o
+            DebugLog.log("Kilit ekranı gösterildi: ${mode.name} $pkg")
+        } catch (e: RuntimeException) {
+            o.stop()
+            DebugLog.error("Kilit ekranı gösterilemedi", e)
+        }
+    }
 
-        fun intent(context: Context, mode: Mode, pkg: String): Intent =
-            Intent(context, LockActivity::class.java)
-                .putExtra(EXTRA_MODE, mode.name)
-                .putExtra(EXTRA_PKG, pkg)
-                .addFlags(
-                    Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or
-                        Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
-                )
+    fun hide() {
+        val r = root ?: return
+        root = null
+        runCatching { wm.removeViewImmediate(r) }.onFailure { DebugLog.error("Kilit ekranı kapatılamadı", it) }
+        owner?.stop()
+        owner = null
+        DebugLog.log("Kilit ekranı kapandı")
+    }
+}
+
+/** Compose'un servis penceresinde çalışması için gereken yaşam döngüsü sahibi. */
+private class OverlayOwner : LifecycleOwner, SavedStateRegistryOwner {
+    private val registry = LifecycleRegistry(this)
+    private val saved = SavedStateRegistryController.create(this)
+    override val lifecycle: Lifecycle get() = registry
+    override val savedStateRegistry: SavedStateRegistry get() = saved.savedStateRegistry
+
+    fun start() {
+        saved.performRestore(null)
+        registry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
+        registry.handleLifecycleEvent(Lifecycle.Event.ON_RESUME)
+    }
+
+    fun stop() {
+        registry.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
     }
 }
 
 @Composable
 internal fun LockContent(
-    mode: LockActivity.Mode,
+    mode: LockMode,
     appLabel: String,
     onEarn: () -> Unit,
     onHome: () -> Unit,
     onEmergency: () -> Unit,
     onUnlocked: () -> Unit,
 ) {
-    val context = androidx.compose.ui.platform.LocalContext.current
+    val context = LocalContext.current
     val repo = remember { App.repo(context) }
     val settings by repo.settings.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
-    var askPassword by remember { mutableStateOf(mode == LockActivity.Mode.PROTECT) }
+    var askPassword by remember(mode) { mutableStateOf(mode == LockMode.PROTECT) }
     var pw by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
 
     val (title, body) = when (mode) {
-        LockActivity.Mode.NO_TIME -> "Süren bitti!" to
+        LockMode.NO_TIME -> "Süren bitti!" to
             (if (appLabel.isNotEmpty()) "$appLabel için " else "") + "süren kalmadı. Birkaç soru çöz, her doğru cevap " +
             "${formatDelta(settings.rewardSec)} kazandırır."
-        LockActivity.Mode.QUIET -> "Gece modu" to "Şu an dinlenme saati. Seçili uygulamalar sabaha kadar kapalı."
-        LockActivity.Mode.PROTECT -> "Bu ayar korunuyor" to "Bu ekranı açmak için ebeveyn şifresi gerekir."
+        LockMode.QUIET -> "Gece modu" to "Şu an dinlenme saati. Seçili uygulamalar sabaha kadar kapalı."
+        LockMode.PROTECT -> "Bu ayar korunuyor" to "Bu ekranı açmak için ebeveyn şifresi gerekir."
     }
 
     Column(
@@ -190,11 +227,12 @@ internal fun LockContent(
                     when (r) {
                         PasswordCheck.Ok -> {
                             val now = System.currentTimeMillis()
-                            if (mode == LockActivity.Mode.PROTECT) {
+                            if (mode == LockMode.PROTECT) {
                                 repo.updateSettings { it.copy(settingsBypassUntil = now + 10 * 60_000L) }
                             } else {
                                 repo.updateSettings { it.copy(parentBypassUntil = now + 30 * 60_000L) }
                             }
+                            DebugLog.log("Kilit ekranında ebeveyn şifresi doğru (${mode.name})")
                             onUnlocked()
                         }
                         is PasswordCheck.Wrong -> error = "Hatalı şifre"
@@ -205,7 +243,7 @@ internal fun LockContent(
             Spacer(Modifier.height(10.dp))
             BigButton("Ana ekrana dön", onHome, style = ButtonStyle.SECONDARY)
         } else {
-            if (mode == LockActivity.Mode.NO_TIME) {
+            if (mode == LockMode.NO_TIME) {
                 BigButton("Soru çöz, süre kazan", onEarn, style = ButtonStyle.SUCCESS)
                 Spacer(Modifier.height(10.dp))
             }

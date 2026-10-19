@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.SystemClock
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
@@ -29,6 +30,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
@@ -54,7 +56,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -68,7 +72,10 @@ import androidx.core.graphics.drawable.toBitmap
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.carpimtablosu.app.data.PasswordCheck
 import com.carpimtablosu.app.data.Progress
+import com.carpimtablosu.app.DebugLog
+import com.carpimtablosu.app.lock.AppLockService
 import com.carpimtablosu.app.logic.BadgeIcon
+import com.carpimtablosu.app.logic.LockPolicy
 import com.carpimtablosu.app.logic.Curriculum
 import com.carpimtablosu.app.logic.Password
 import com.carpimtablosu.app.logic.ProgressOps
@@ -208,6 +215,7 @@ fun ParentScreen(vm: AppViewModel, section: ParentSection) {
         ParentSection.RULES -> RulesScreen(vm)
         ParentSection.REPORT -> ReportScreen(vm)
         ParentSection.SECURITY -> SecurityScreen(vm)
+        ParentSection.DIAGNOSTICS -> DiagnosticsScreen(vm)
     }
 }
 
@@ -259,6 +267,21 @@ private fun ParentMain(vm: AppViewModel) {
     }
 
     ScreenScaffold("Ebeveyn paneli", onBack = { vm.back() }) {
+        if (serviceOn && !AppLockService.connected) {
+            Card {
+                Column {
+                    Text("Kilit servisi çalışmıyor", style = MaterialTheme.typography.titleMedium, color = Palette.Amber)
+                    Text(
+                        "Servis ayarlarda açık görünüyor ama telefon onu durdurmuş. Erişilebilirlik ayarlarından " +
+                            "kapatıp yeniden açın ve pil kısıtlamasını kaldırın. Ayrıntı: Tanılama ve kayıtlar.",
+                        color = Palette.TextDim,
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    BigButton("Erişilebilirlik ayarları", { safeStart(context, SystemAccess.accessibilitySettings()) })
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+        }
         if (!serviceOn) {
             Card {
                 Column {
@@ -346,6 +369,9 @@ private fun ParentMain(vm: AppViewModel) {
                 }
                 NavRow(BadgeIcon.CHECK, Palette.Purple, "Güvenlik ve izinler", "Şifre, koruma, izin durumu") {
                     vm.push(Screen.Parent(ParentSection.SECURITY))
+                }
+                NavRow(BadgeIcon.BULB, Palette.Amber, "Tanılama ve kayıtlar", "Kilit çalışmıyorsa buraya bakın") {
+                    vm.push(Screen.Parent(ParentSection.DIAGNOSTICS))
                 }
             }
         }
@@ -550,6 +576,105 @@ private fun ReportRow(a: String, b: String, c: String, d: String, e: String, hea
         Text(d, Modifier.weight(1.2f), color = color, fontWeight = weight, textAlign = TextAlign.End)
         Text(e, Modifier.weight(1.3f), color = color, fontWeight = weight, textAlign = TextAlign.End)
     }
+}
+
+// ======================================================================================
+// Tanılama
+// ======================================================================================
+
+@Composable
+private fun DiagnosticsScreen(vm: AppViewModel) {
+    val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
+    val settings by vm.settings.collectAsStateWithLifecycle()
+    val time by vm.time.collectAsStateWithLifecycle()
+    var refresh by remember { mutableIntStateOf(0) }
+    var log by remember { mutableStateOf("") }
+    var info by remember { mutableStateOf<String?>(null) }
+    var tick by remember { mutableLongStateOf(0L) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            tick = SystemClock.elapsedRealtime()
+            delay(2_000)
+        }
+    }
+    LaunchedEffect(refresh, vm.resumeTick) { log = withContext(Dispatchers.IO) { DebugLog.read() } }
+    val summary = remember(settings, time, tick, vm.resumeTick) { diagnosticsSummary(context, settings, time) }
+
+    ScreenScaffold("Tanılama ve kayıtlar", onBack = { vm.back() }) {
+        Text(
+            "Kilit beklendiği gibi çalışmıyorsa \"Kayıtları kopyala\" ile metni kopyalayıp geliştiriciye gönderin.",
+            color = Palette.TextDim,
+        )
+        Spacer(Modifier.height(10.dp))
+        Card {
+            Text(summary, fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = Palette.Text, lineHeight = 17.sp)
+        }
+        Spacer(Modifier.height(10.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            SmallButton("Kilit ekranını dene", Modifier.weight(1f)) {
+                val s = AppLockService.instance
+                if (s == null) info = "Servis çalışmıyor; önce erişilebilirlik servisini açın." else s.showTestLock()
+            }
+            SmallButton("Yenile", Modifier.weight(1f)) { refresh++ }
+        }
+        Spacer(Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            SmallButton("Kayıtları kopyala", Modifier.weight(1f)) {
+                clipboard.setText(AnnotatedString(summary + "\n\n--- Kayıtlar ---\n" + DebugLog.read(1500)))
+                info = "Kopyalandı. Mesaj olarak yapıştırabilirsiniz."
+            }
+            SmallButton("Kayıtları sil", Modifier.weight(1f)) {
+                DebugLog.clear()
+                refresh++
+            }
+        }
+        info?.let {
+            Spacer(Modifier.height(8.dp))
+            Text(it, color = Palette.Green)
+        }
+        SectionTitle("Kayıtlar")
+        Card {
+            SelectionContainer {
+                Text(
+                    log.ifEmpty { "Henüz kayıt yok." },
+                    fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = Palette.TextDim, lineHeight = 15.sp,
+                )
+            }
+        }
+    }
+}
+
+private fun diagnosticsSummary(
+    context: Context,
+    s: com.carpimtablosu.app.data.Settings,
+    t: com.carpimtablosu.app.data.TimeState,
+): String {
+    val now = System.currentTimeMillis()
+    val hb = AppLockService.heartbeat
+    val beat = if (hb == 0L) "hiç" else "${(SystemClock.elapsedRealtime() - hb) / 1000} sn önce"
+    val fmt = DateTimeFormatter.ofPattern("HH:mm")
+    fun hm(m: Int) = "%02d:%02d".format(m / 60, m % 60)
+    val version = runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName }.getOrNull()
+    val lines = listOf(
+        "Erişilebilirlik (ayar): " + if (SystemAccess.isAccessibilityEnabled(context)) "AÇIK" else "KAPALI",
+        "Servis çalışıyor: " + (if (AppLockService.connected) "EVET" else "HAYIR") + " (son sinyal: $beat)",
+        "Kurulum tamam: " + if (s.onboarded) "evet" else "HAYIR",
+        "Kilitler: " + if (s.locksEnabled) "açık" else "KAPALI",
+        "Ebeveyn muafiyeti: " + if (s.parentBypassUntil > now) {
+            Instant.ofEpochMilli(s.parentBypassUntil).atZone(ZoneId.systemDefault()).format(fmt) + "'e kadar"
+        } else "yok",
+        "Kilitler şu an etkin: " + if (LockPolicy.locksActive(s, now)) "EVET" else "HAYIR",
+        "Gece modu: " + if (s.quietEnabled) "${hm(s.quietStartMin)}–${hm(s.quietEndMin)}" else "kapalı",
+        "Kalan süre: ${TimeBank.format(t.bankSec)} (${t.bankSec} sn)",
+        "Kilitli uygulamalar (${s.lockedApps.size}): " + s.lockedApps.sorted().joinToString(", ").ifEmpty { "YOK" },
+        "Son ön plan: " + (AppLockService.lastForeground ?: "-"),
+        "Son karar: " + (AppLockService.lastDecision ?: "-"),
+        "Bildirim izni: " + if (SystemAccess.notificationsAllowed(context)) "var" else "YOK",
+        "Pil kısıtlaması yok: " + if (SystemAccess.isIgnoringBattery(context)) "evet" else "hayır",
+        "Cihaz: ${Build.MANUFACTURER} ${Build.MODEL}, Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}), uygulama $version",
+    )
+    return lines.joinToString("\n")
 }
 
 // ======================================================================================

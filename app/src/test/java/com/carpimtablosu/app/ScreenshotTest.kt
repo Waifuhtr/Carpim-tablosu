@@ -8,8 +8,8 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
 import androidx.test.core.app.ApplicationProvider
 import com.carpimtablosu.app.data.FactStat
-import com.carpimtablosu.app.lock.LockActivity
 import com.carpimtablosu.app.lock.LockContent
+import com.carpimtablosu.app.lock.LockMode
 import com.carpimtablosu.app.logic.Curriculum
 import com.carpimtablosu.app.logic.LessonKind
 import com.carpimtablosu.app.logic.QType
@@ -130,13 +130,15 @@ class ScreenshotTest {
         root("24_guvenlik")
         vm.push(Screen.Parent(ParentSection.APPS))
         root("25_uygulamalar")
+        vm.push(Screen.Parent(ParentSection.DIAGNOSTICS))
+        root("26_tanilama")
     }
 
     @Test fun onboardingAndLock() {
         app.repo.updateSettings { it.copy(onboarded = false) }
         val fresh = AppViewModel(app)
         shot("30_kurulum") { AppRoot(fresh) {} }
-        LockActivity.Mode.entries.forEach { m ->
+        LockMode.entries.forEach { m ->
             shot("31_kilit_${m.name.lowercase()}") {
                 LockContent(m, "YouTube", {}, {}, {}, {})
             }

@@ -4,6 +4,7 @@ import android.app.Application
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
+import android.os.Build
 import com.carpimtablosu.app.data.Repository
 
 class App : Application() {
@@ -12,6 +13,11 @@ class App : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        DebugLog.init(this)
+        val version = runCatching { packageManager.getPackageInfo(packageName, 0).versionName }.getOrNull()
+        DebugLog.log(
+            "Uygulama başladı: sürüm=$version cihaz=${Build.MANUFACTURER} ${Build.MODEL} Android=${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})"
+        )
         repo = Repository(this)
         createChannels()
     }
