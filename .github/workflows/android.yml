@@ -1,0 +1,96 @@
+name: Android
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # İsteğe bağlı: kendi imza anahtarınızı Settings > Secrets bölümüne eklerseniz kullanılır.
+      # Eklenmezse depodaki sabit anahtar kullanılır (güncellemeler yine üstüne kurulur).
+      RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+      RELEASE_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+      RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+      RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+      VERSION: 1.0.${{ github.run_number }}
+
+    steps:
+      - name: Kodu al
+        uses: actions/checkout@v4
+
+      - name: Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: İmza anahtarı (varsa)
+        if: env.RELEASE_KEYSTORE_BASE64 != ''
+        run: |
+          echo "$RELEASE_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          echo "RELEASE_KEYSTORE_PATH=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+
+      - name: Birim testleri
+        run: ./gradlew --no-daemon testDebugUnitTest
+
+      - name: Lint
+        run: ./gradlew --no-daemon lintDebug
+
+      - name: APK derle
+        run: ./gradlew --no-daemon assembleRelease
+
+      - name: APK'yı adlandır
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/release/app-release.apk dist/CarpimTablosu.apk
+          cp app/build/outputs/apk/release/app-release.apk "dist/CarpimTablosu-$VERSION.apk"
+
+      - name: APK'yı yükle (Actions artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: CarpimTablosu-${{ env.VERSION }}
+          path: dist/CarpimTablosu-${{ env.VERSION }}.apk
+
+      - name: Raporları yükle (hata durumunda)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: raporlar
+          path: |
+            app/build/reports
+            app/build/test-results
+
+      # Her push'ta indirilebilir bir sürüm yayınlanır. En son sürümün sabit linki:
+      # https://github.com/<kullanıcı>/<depo>/releases/latest/download/CarpimTablosu.apk
+      - name: GitHub Release
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v{0}', env.VERSION) }}
+          name: Çarpım Tablosu ${{ env.VERSION }}
+          target_commitish: ${{ github.sha }}
+          make_latest: "true"
+          body: |
+            Kurulum: `CarpimTablosu.apk` dosyasını telefona indirip açın. "Bilinmeyen kaynaklar" izni istenirse verin.
+            Önceki sürüm kuruluysa bu sürüm üstüne güncelleme olarak kurulur; ilerleme silinmez.
+
+            Commit: ${{ github.sha }}
+          files: |
+            dist/CarpimTablosu.apk
+            dist/CarpimTablosu-${{ env.VERSION }}.apk

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Çarpım Tablosu</string>
+    <string name="a11y_service_label">Çarpım Tablosu kilit servisi</string>
+    <string name="a11y_service_desc">Ebeveynin seçtiği uygulamaları, çarpım sorularıyla kazanılan süre bitince kilitler. Ekrandaki içerik okunmaz veya kaydedilmez; yalnızca hangi uygulamanın açık olduğu kontrol edilir.</string>
+    <string name="admin_label">Çarpım Tablosu koruması</string>
+    <string name="admin_desc">Uygulamanın ebeveyn izni olmadan kaldırılmasını engeller.</string>
+    <string name="channel_time">Kalan süre</string>
+    <string name="channel_alerts">Süre uyarıları</string>
+</resources>
